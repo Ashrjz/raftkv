@@ -5,12 +5,12 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 ---
 
 ## Phase 0: Groundwork
-- [ ] Read Raft paper (full read-through #1)
-- [ ] Read Raft paper again, focus on Figure 2 (state + RPC rules)
-- [ ] Walk through Raft visualization (thesecretlivesofdata.com/raft)
-- [ ] Skim etcd's `raft` package layout for structural reference
-- [ ] Write 1-page design doc: supported ops, consistency model, non-goals
-- [ ] Decide: gRPC for all networking (confirm)
+- [x] Read Raft paper (full read-through #1)
+- [~] Read Raft paper again, focus on Figure 2 (state + RPC rules)
+- [x] Walk through Raft visualization (thesecretlivesofdata.com/raft)
+- [x] Skim etcd's `raft` package layout for structural reference
+- [x] Write 1-page design doc: supported ops, consistency model, non-goals
+- [x] Decide: gRPC for all networking (confirm)
 - [ ] Set up repo, module structure, CI (lint + test + race detector on push)
 - [ ] Set up `goleak` in test suite baseline
 

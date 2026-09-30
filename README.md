@@ -1,4 +1,4 @@
-# distributed-kv (working title — see repo name options below)
+# raftkv
 
 A distributed, replicated key-value store built from scratch in Go, using a
 self-implemented Raft consensus protocol. This is a learning project aimed at
