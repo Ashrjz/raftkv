@@ -13,7 +13,7 @@ down to a single-developer, learnable size.
 🚧 Early development. See [TODO.md](./TODO.md) for the full build plan and
 current progress.
 
-Current phase: **Phase 0 — Groundwork**
+Current phase: **Phase 1: Storage Engine**
 
 ## Goals
 

@@ -15,7 +15,7 @@
 ## Phase 1: Storage Engine (single-node, durable)
 - [x] In-memory map + mutex baseline (Get/Put/Delete)
 - [x] Design WAL record format (length-prefixed + CRC32 checksum)
-- [ ] Implement WAL append-on-write, `fsync` per write
+- [x] Implement WAL append-on-write, `fsync` per write
 - [ ] Implement WAL replay on startup (rebuild map from log)
 - [ ] Handle torn/partial last record on recovery (detect + discard)
 - [ ] Implement snapshotting (dump map to disk)
