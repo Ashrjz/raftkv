@@ -1,9 +1,5 @@
 # TODO — Distributed KV Store (Raft, Go)
 
-Legend: `[ ]` not started · `[~]` in progress · `[x]` done
-
----
-
 ## Phase 0: Groundwork
 - [x] Read Raft paper (full read-through #1)
 - [~] Read Raft paper again, focus on Figure 2 (state + RPC rules)
@@ -11,14 +7,14 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] Skim etcd's `raft` package layout for structural reference
 - [x] Write 1-page design doc: supported ops, consistency model, non-goals
 - [x] Decide: gRPC for all networking (confirm)
-- [ ] Set up repo, module structure, CI (lint + test + race detector on push)
+- [x] Set up repo, module structure, CI (lint + test + race detector on push)
 - [ ] Set up `goleak` in test suite baseline
 
 ---
 
 ## Phase 1: Storage Engine (single-node, durable)
-- [ ] In-memory map + mutex baseline (Get/Put/Delete)
-- [ ] Design WAL record format (length-prefixed + CRC32 checksum)
+- [x] In-memory map + mutex baseline (Get/Put/Delete)
+- [x] Design WAL record format (length-prefixed + CRC32 checksum)
 - [ ] Implement WAL append-on-write, `fsync` per write
 - [ ] Implement WAL replay on startup (rebuild map from log)
 - [ ] Handle torn/partial last record on recovery (detect + discard)
