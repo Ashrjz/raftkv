@@ -1,8 +1,10 @@
 package wal
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -69,6 +71,48 @@ func (w *WAL) Append(rec Record) error {
 		return w.broken
 	}
 	return nil
+}
+
+// Returns the number of records successfully decoded.
+func (w *WAL) Replay(fn func(Record) error) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.broken != nil {
+		return 0, w.broken
+	}
+	if _, err := w.f.Seek(0, io.SeekStart); err != nil {
+		return 0, err
+	}
+
+	// 64 KiB here only batches syscalls; it does not limit record size.
+	br := bufio.NewReaderSize(w.f, 64*1024)
+
+	var hdr [HeaderSize]byte
+	if _, err := io.ReadFull(br, hdr[:]); err != nil {
+		return 0, fmt.Errorf("replay: read header: %w", err)
+	}
+	// TODO: validate magic/version/header CRC against your spec.
+
+	count := 0
+	offset := int64(HeaderSize)
+	for {
+		rec, n, err := ReadRecord(br)
+		if err == io.EOF {
+			return count, nil // clean end at a record boundary
+		}
+		if err != nil {
+			// Torn tail or corruption. Task 5 will decide what to do;
+			// until then, fail loudly with the offset instead of silently
+			// dropping data.
+			return count, fmt.Errorf("replay: at offset %d: %w", offset, err)
+		}
+		if err := fn(rec); err != nil {
+			return count, fmt.Errorf("replay: apply at offset %d: %w", offset, err)
+		}
+		count++
+		offset += int64(n)
+	}
 }
 
 // Close closes the underlying file.

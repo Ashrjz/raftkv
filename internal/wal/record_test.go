@@ -80,3 +80,47 @@ func TestEncodeBoundaries(t *testing.T) {
 		t.Fatalf("empty value should be legal: %v", err)
 	}
 }
+
+/* func TestDecodeHeaderGolden(t *testing.T) {
+	want := mustHex(t, "524B5657 | 0001 | 000000000000 | 5CDEF27B")
+	// Header validation happens at WAL.Open, not in DecodeRecord.
+	// This test is for future reference; skip for now or test header detection separately.
+} */
+
+func TestDecodePutGolden(t *testing.T) {
+	buf := mustHex(t, "B7622D95 | 0000000A | 01 | 00000001 61 00000001 62")
+	rec, consumed, err := DecodeRecord(buf)
+	if err != nil || consumed != len(buf) {
+		t.Fatalf("DecodeRecord failed: %v, consumed %d", err, consumed)
+	}
+	if rec.Type != TypePut || string(rec.Key) != "a" || string(rec.Value) != "b" {
+		t.Fatalf("got %+v", rec)
+	}
+}
+
+func TestDecodeDeleteGolden(t *testing.T) {
+	buf := mustHex(t, "75BD31A7 | 00000005 | 02 | 00000001 61")
+	rec, consumed, err := DecodeRecord(buf)
+	if err != nil || consumed != len(buf) {
+		t.Fatalf("DecodeRecord failed: %v", err)
+	}
+	if rec.Type != TypeDelete || string(rec.Key) != "a" {
+		t.Fatalf("got %+v", rec)
+	}
+}
+
+func TestDecodeCorruptCRC(t *testing.T) {
+	buf := mustHex(t, "FFFFFFFF | 0000000A | 01 | 00000001 61 00000001 62") // bad CRC
+	_, _, err := DecodeRecord(buf)
+	if err != ErrInvalid {
+		t.Fatalf("expected ErrInvalid for corrupt CRC, got %v", err)
+	}
+}
+
+func TestDecodePartialRecord(t *testing.T) {
+	buf := mustHex(t, "B7622D95 | 0000000A | 01 | 00000001 61") // truncated before value
+	_, _, err := DecodeRecord(buf)
+	if err != ErrInvalid {
+		t.Fatalf("expected ErrInvalid for partial record, got %v", err)
+	}
+}

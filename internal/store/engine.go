@@ -13,11 +13,31 @@ type Engine struct {
 }
 
 // NewEngine initializes a Engine from an open WAL and an empty MemStore.
-func NewEngine(w *wal.WAL) *Engine {
-	return &Engine{
-		mem: NewMemStore(),
-		wal: w,
+func NewEngine(walPath string) (*Engine, error) {
+	w, err := wal.Open(walPath)
+	if err != nil {
+		return nil, err
 	}
+
+	mem := NewMemStore()
+
+	// Replay the WAL to reconstruct state
+	_, err = w.Replay(func(rec wal.Record) error {
+		switch rec.Type {
+		case wal.TypePut:
+			return mem.Put(string(rec.Key), rec.Value)
+		case wal.TypeDelete:
+			return mem.Delete(string(rec.Key))
+		default:
+			return fmt.Errorf("unknown record type %d", rec.Type)
+		}
+	})
+	if err != nil {
+		w.Close()
+		return nil, err
+	}
+
+	return &Engine{mem: mem, wal: w}, nil
 }
 
 // Get reads directly from the in-memory state (fast read path).
@@ -56,4 +76,8 @@ func (e *Engine) Delete(key string) error {
 
 	// 2. Delete key from in-memory map
 	return e.mem.Delete(key)
+}
+
+func (e *Engine) Close() error {
+	return e.wal.Close()
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
+	"io"
 )
 
 // Format constants (docs/wal-format.md, v1).
@@ -95,4 +96,97 @@ func encodeRecord(r Record) ([]byte, error) {
 	// 4. CRC over everything after the CRC field (Length + Type + Payload).
 	binary.BigEndian.PutUint32(buf[0:4], crc32.Checksum(buf[4:], castagnoli))
 	return buf, nil
+}
+
+// ReadRecord reads exactly one record from r.
+//
+// Returns:
+//
+//	io.EOF              - clean end: zero bytes available at a record boundary
+//	io.ErrUnexpectedEOF - stream ended mid-record (torn tail candidate, task 5)
+//	ErrInvalid          - bad length, CRC mismatch, bad type, etc.
+func ReadRecord(r io.Reader) (Record, int, error) {
+	var prefix [9]byte
+	if _, err := io.ReadFull(r, prefix[:]); err != nil {
+		return Record{}, 0, err // io.EOF if 0 bytes, io.ErrUnexpectedEOF if 1..8
+	}
+
+	length := binary.BigEndian.Uint32(prefix[4:8])
+	if length == 0 || length > MaxPayload {
+		return Record{}, 0, ErrInvalid // reject BEFORE allocating
+	}
+
+	buf := make([]byte, 9+int(length))
+	copy(buf, prefix[:])
+	if _, err := io.ReadFull(r, buf[9:]); err != nil {
+		if err == io.EOF {
+			err = io.ErrUnexpectedEOF // we already consumed the prefix
+		}
+		return Record{}, 0, err
+	}
+
+	return DecodeRecord(buf) // CRC, type, payload structure
+}
+
+// DecodeRecord reads one record from a byte slice starting at offset 0.
+// It validates the CRC, length, and type, then returns the decoded Record.
+// Returns (Record, bytesConsumed, error).
+func DecodeRecord(buf []byte) (Record, int, error) {
+	if len(buf) < 9 {
+		return Record{}, 0, ErrInvalid // not enough for CRC(4) + Length(4) + Type(1)
+	}
+
+	// 1. Parse header
+	crc := binary.BigEndian.Uint32(buf[0:4])
+	length := binary.BigEndian.Uint32(buf[4:8])
+	typ := buf[8]
+
+	// 2. Validate length
+	if length == 0 || length > MaxPayload {
+		return Record{}, 0, ErrInvalid
+	}
+
+	// 3. Ensure we have the full record
+	totalLen := 9 + int(length)
+	if len(buf) < totalLen {
+		return Record{}, 0, ErrInvalid // partial record, will be handled in task 5
+	}
+
+	// 4. Validate CRC over Length + Type + Payload
+	payload := buf[9 : 9+length]
+	expectedCRC := crc32.Checksum(buf[4:9+length], castagnoli)
+	if crc != expectedCRC {
+		return Record{}, 0, ErrInvalid // corrupted
+	}
+
+	// 5. Validate type
+	if typ != TypePut && typ != TypeDelete {
+		return Record{}, 0, ErrInvalid
+	}
+
+	// 6. Decode payload
+	if len(payload) < 4 {
+		return Record{}, 0, ErrInvalid
+	}
+	keyLen := binary.BigEndian.Uint32(payload[0:4])
+	if int(keyLen) > MaxKeySize || 4+int(keyLen) > len(payload) {
+		return Record{}, 0, ErrInvalid
+	}
+
+	key := payload[4 : 4+keyLen]
+	var value []byte
+
+	if typ == TypePut {
+		if 4+int(keyLen)+4 > len(payload) {
+			return Record{}, 0, ErrInvalid
+		}
+		valueLen := binary.BigEndian.Uint32(payload[4+keyLen : 4+keyLen+4])
+		if int(valueLen) > MaxValueSize || 4+int(keyLen)+4+int(valueLen) != len(payload) {
+			return Record{}, 0, ErrInvalid
+		}
+		value = payload[4+keyLen+4 : 4+keyLen+4+valueLen]
+	}
+	// For Delete, value is ignored and stays nil
+
+	return Record{Type: typ, Key: append([]byte(nil), key...), Value: append([]byte(nil), value...)}, totalLen, nil
 }
