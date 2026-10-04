@@ -8,8 +8,9 @@ import (
 
 // Engine wraps an in-memory Store with a WAL for write-ahead durability.
 type Engine struct {
-	mem *MemStore
-	wal *wal.WAL
+	mem      *MemStore
+	wal      *wal.WAL
+	recovery wal.RecoveryResult
 }
 
 // NewEngine initializes a Engine from an open WAL and an empty MemStore.
@@ -22,7 +23,7 @@ func NewEngine(walPath string) (*Engine, error) {
 	mem := NewMemStore()
 
 	// Replay the WAL to reconstruct state
-	_, err = w.Replay(func(rec wal.Record) error {
+	res, err := w.Recover(func(rec wal.Record) error {
 		switch rec.Type {
 		case wal.TypePut:
 			return mem.Put(string(rec.Key), rec.Value)
@@ -37,7 +38,7 @@ func NewEngine(walPath string) (*Engine, error) {
 		return nil, err
 	}
 
-	return &Engine{mem: mem, wal: w}, nil
+	return &Engine{mem: mem, wal: w, recovery: res}, nil
 }
 
 // Get reads directly from the in-memory state (fast read path).

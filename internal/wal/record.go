@@ -1,8 +1,10 @@
 package wal
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"hash/crc32"
 	"io"
 )
@@ -14,6 +16,7 @@ const (
 	MaxPayload   = 16 << 20          // 16 MiB, package constant, not in header
 	MaxKeySize   = 1 << 10           // 1 KiB
 	MaxValueSize = MaxPayload - 4096 // 16 MiB - 4 KiB
+	minPayload   = 5                 // smallest valid payload: a Delete with 1-byte key (4 + 1)
 )
 
 // Record types. 0 is deliberately unused so zeroed disk regions are invalid.
@@ -28,9 +31,14 @@ var magic = [4]byte{'R', 'K', 'V', 'W'}
 var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 
 var (
-	ErrInvalid  = errors.New("wal: invalid record")
-	ErrTooLarge = errors.New("wal: key or value exceeds size limit")
-	ErrEmptyKey = errors.New("wal: empty key")
+	ErrInvalid   = errors.New("wal: invalid record")
+	ErrTooLarge  = errors.New("wal: key or value exceeds size limit")
+	ErrEmptyKey  = errors.New("wal: empty key")
+	ErrBadLength = fmt.Errorf("%w: bad length", ErrInvalid)
+	ErrChecksum  = fmt.Errorf("%w: checksum mismatch", ErrInvalid)
+	ErrBadType   = fmt.Errorf("%w: unknown record type", ErrInvalid)
+	ErrMalformed = fmt.Errorf("%w: malformed payload", ErrInvalid)
+	ErrBadHeader = errors.New("wal: invalid header")
 )
 
 // Record is the in-memory form of one log entry.
@@ -50,6 +58,22 @@ func encodeHeader() []byte {
 	// h[6:12] stays zero (reserved)
 	binary.BigEndian.PutUint32(h[12:16], crc32.Checksum(h[0:12], castagnoli))
 	return h
+}
+
+func validateHeader(h []byte) error {
+	if len(h) != HeaderSize {
+		return fmt.Errorf("%w: short header", ErrBadHeader)
+	}
+	if !bytes.Equal(h[0:4], magic[:]) {
+		return fmt.Errorf("%w: bad magic", ErrBadHeader)
+	}
+	if binary.BigEndian.Uint16(h[4:6]) != FormatVer {
+		return fmt.Errorf("%w: unsupported version", ErrBadHeader)
+	}
+	if binary.BigEndian.Uint32(h[12:16]) != crc32.Checksum(h[0:12], castagnoli) {
+		return fmt.Errorf("%w: header checksum", ErrBadHeader)
+	}
+	return nil
 }
 
 // encodeRecord builds one record as a single contiguous buffer:
@@ -112,8 +136,8 @@ func ReadRecord(r io.Reader) (Record, int, error) {
 	}
 
 	length := binary.BigEndian.Uint32(prefix[4:8])
-	if length == 0 || length > MaxPayload {
-		return Record{}, 0, ErrInvalid // reject BEFORE allocating
+	if length < minPayload || length > MaxPayload {
+		return Record{}, len(prefix), ErrBadLength // n = bytes consumed so far
 	}
 
 	buf := make([]byte, 9+int(length))
@@ -125,7 +149,8 @@ func ReadRecord(r io.Reader) (Record, int, error) {
 		return Record{}, 0, err
 	}
 
-	return DecodeRecord(buf) // CRC, type, payload structure
+	rec, _, err := DecodeRecord(buf) // CRC, type, payload structure
+	return rec, len(buf), err
 }
 
 // DecodeRecord reads one record from a byte slice starting at offset 0.
@@ -142,8 +167,8 @@ func DecodeRecord(buf []byte) (Record, int, error) {
 	typ := buf[8]
 
 	// 2. Validate length
-	if length == 0 || length > MaxPayload {
-		return Record{}, 0, ErrInvalid
+	if length < minPayload || length > MaxPayload {
+		return Record{}, 0, ErrBadLength
 	}
 
 	// 3. Ensure we have the full record
@@ -156,21 +181,21 @@ func DecodeRecord(buf []byte) (Record, int, error) {
 	payload := buf[9 : 9+length]
 	expectedCRC := crc32.Checksum(buf[4:9+length], castagnoli)
 	if crc != expectedCRC {
-		return Record{}, 0, ErrInvalid // corrupted
+		return Record{}, 0, ErrChecksum // corrupted
 	}
 
 	// 5. Validate type
 	if typ != TypePut && typ != TypeDelete {
-		return Record{}, 0, ErrInvalid
+		return Record{}, 0, ErrBadType
 	}
 
 	// 6. Decode payload
 	if len(payload) < 4 {
-		return Record{}, 0, ErrInvalid
+		return Record{}, 0, ErrMalformed
 	}
 	keyLen := binary.BigEndian.Uint32(payload[0:4])
 	if int(keyLen) > MaxKeySize || 4+int(keyLen) > len(payload) {
-		return Record{}, 0, ErrInvalid
+		return Record{}, 0, ErrMalformed
 	}
 
 	key := payload[4 : 4+keyLen]
@@ -178,11 +203,11 @@ func DecodeRecord(buf []byte) (Record, int, error) {
 
 	if typ == TypePut {
 		if 4+int(keyLen)+4 > len(payload) {
-			return Record{}, 0, ErrInvalid
+			return Record{}, 0, ErrMalformed
 		}
 		valueLen := binary.BigEndian.Uint32(payload[4+keyLen : 4+keyLen+4])
 		if int(valueLen) > MaxValueSize || 4+int(keyLen)+4+int(valueLen) != len(payload) {
-			return Record{}, 0, ErrInvalid
+			return Record{}, 0, ErrMalformed
 		}
 		value = payload[4+keyLen+4 : 4+keyLen+4+valueLen]
 	}

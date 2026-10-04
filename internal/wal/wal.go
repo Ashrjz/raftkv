@@ -2,6 +2,7 @@ package wal
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +18,13 @@ type WAL struct {
 	mu     sync.Mutex
 	f      *os.File
 	broken error
+}
+
+type RecoveryResult struct {
+	Records        int   // records applied
+	GoodOffset     int64 // file is valid up to here
+	DiscardedBytes int64 // torn tail removed (0 if clean)
+	DiscardReason  string
 }
 
 // Open creates a new WAL (header + fsync + dir fsync) or opens an existing one.
@@ -73,46 +81,138 @@ func (w *WAL) Append(rec Record) error {
 	return nil
 }
 
-// Returns the number of records successfully decoded.
-func (w *WAL) Replay(fn func(Record) error) (int, error) {
+// Recover replays the log through fn and repairs a torn tail.
+// It must complete before the first Append.
+func (w *WAL) Recover(fn func(Record) error) (RecoveryResult, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-
 	if w.broken != nil {
-		return 0, w.broken
-	}
-	if _, err := w.f.Seek(0, io.SeekStart); err != nil {
-		return 0, err
+		return RecoveryResult{}, w.broken
 	}
 
-	// 64 KiB here only batches syscalls; it does not limit record size.
-	br := bufio.NewReaderSize(w.f, 64*1024)
+	st, err := w.f.Stat()
+	if err != nil {
+		return RecoveryResult{}, err
+	}
+	size := st.Size()
+
+	// A header that is a strict prefix of the expected one means we crashed
+	// while creating the file. Nothing could have been acknowledged.
+	if size < HeaderSize {
+		existing := make([]byte, size)
+		if _, err := w.f.ReadAt(existing, 0); err != nil && err != io.EOF {
+			return RecoveryResult{}, err
+		}
+		if !bytes.Equal(existing, encodeHeader()[:size]) {
+			return RecoveryResult{}, fmt.Errorf("%w: short file is not a header prefix", ErrBadHeader)
+		}
+		if err := w.f.Truncate(0); err != nil {
+			return RecoveryResult{}, err
+		}
+		if _, err := w.f.Write(encodeHeader()); err != nil { // O_APPEND: lands at 0
+			return RecoveryResult{}, err
+		}
+		if err := w.f.Sync(); err != nil {
+			return RecoveryResult{}, err
+		}
+		return RecoveryResult{GoodOffset: HeaderSize, DiscardedBytes: size,
+			DiscardReason: "torn header"}, nil
+	}
+
+	if _, err := w.f.Seek(0, io.SeekStart); err != nil {
+		return RecoveryResult{}, err
+	}
+	br := bufio.NewReaderSize(w.f, 64*1024) // batches syscalls only
 
 	var hdr [HeaderSize]byte
 	if _, err := io.ReadFull(br, hdr[:]); err != nil {
-		return 0, fmt.Errorf("replay: read header: %w", err)
+		return RecoveryResult{}, fmt.Errorf("recover: read header: %w", err)
 	}
-	// TODO: validate magic/version/header CRC against your spec.
+	if err := validateHeader(hdr[:]); err != nil {
+		return RecoveryResult{}, err
+	}
 
-	count := 0
-	offset := int64(HeaderSize)
+	res := RecoveryResult{GoodOffset: HeaderSize}
 	for {
 		rec, n, err := ReadRecord(br)
 		if err == io.EOF {
-			return count, nil // clean end at a record boundary
+			return res, nil // clean end at a record boundary
 		}
 		if err != nil {
-			// Torn tail or corruption. Task 5 will decide what to do;
-			// until then, fail loudly with the offset instead of silently
-			// dropping data.
-			return count, fmt.Errorf("replay: at offset %d: %w", offset, err)
+			torn, reason, cerr := w.isTornTail(err, res.GoodOffset, int64(n), size)
+			if cerr != nil {
+				return res, cerr
+			}
+			if !torn {
+				return res, fmt.Errorf("recover: corruption at offset %d (not a torn tail): %w",
+					res.GoodOffset, err)
+			}
+			// Discard the torn record durably BEFORE accepting any new append.
+			if err := w.f.Truncate(res.GoodOffset); err != nil {
+				return res, fmt.Errorf("recover: truncate: %w", err)
+			}
+			if err := w.f.Sync(); err != nil {
+				return res, fmt.Errorf("recover: sync after truncate: %w", err)
+			}
+			res.DiscardedBytes = size - res.GoodOffset
+			res.DiscardReason = reason
+			return res, nil
 		}
 		if err := fn(rec); err != nil {
-			return count, fmt.Errorf("replay: apply at offset %d: %w", offset, err)
+			return res, fmt.Errorf("recover: apply at offset %d: %w", res.GoodOffset, err)
 		}
-		count++
-		offset += int64(n)
+		res.Records++
+		res.GoodOffset += int64(n)
 	}
+}
+
+// isTornTail implements the table above. off is where the failed record
+// starts, consumed is how many bytes ReadRecord took from the stream.
+func (w *WAL) isTornTail(err error, off, consumed, size int64) (bool, string, error) {
+	switch {
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return true, "file ends mid-record", nil
+	case errors.Is(err, ErrChecksum):
+		if off+consumed == size {
+			return true, "last record fails checksum", nil
+		}
+		return false, "", nil // more data follows: damage, not a torn write
+	case errors.Is(err, ErrBadLength):
+		zero, zerr := w.allZeroFrom(off, size)
+		if zerr != nil {
+			return false, "", zerr
+		}
+		if zero {
+			return true, "zero-filled tail", nil
+		}
+		return false, "", nil
+	default: // ErrBadType, ErrMalformed, read errors: never a crash artifact
+		return false, "", nil
+	}
+}
+
+func (w *WAL) allZeroFrom(off, size int64) (bool, error) {
+	buf := make([]byte, 64*1024)
+	for off < size {
+		n := int64(len(buf))
+		if size-off < n {
+			n = size - off
+		}
+		m, err := w.f.ReadAt(buf[:n], off)
+		if err != nil && err != io.EOF {
+			return false, err
+		}
+		if m == 0 {
+			return false, io.ErrUnexpectedEOF
+		}
+		for _, b := range buf[:m] {
+			if b != 0 {
+				return false, nil
+			}
+		}
+		off += int64(m)
+	}
+	return true, nil
 }
 
 // Close closes the underlying file.

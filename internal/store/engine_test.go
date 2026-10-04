@@ -111,7 +111,7 @@ func TestEnginePutMultiple(t *testing.T) {
 
 	for i := 0; i < 10; i++ {
 		key := fmt.Sprintf("key%d", i)
-		val := []byte(fmt.Sprintf("val%d", i))
+		val := fmt.Appendf(nil, "val%d", i)
 		if err := e.Put(key, val); err != nil {
 			t.Fatalf("Put %s failed: %v", key, err)
 		}
@@ -321,6 +321,49 @@ func TestEngineReplayAcrossChunkBoundaries(t *testing.T) {
 		if !bytes.Equal(got, valueFor(i)) {
 			t.Fatalf("%s: value mismatch (len got=%d want=%d)", key, len(got), i%700)
 		}
+	}
+}
+
+func TestEngineRecoversFromTornTail(t *testing.T) {
+	path := walPathIn(t)
+
+	e1 := openEngine(t, path)
+	mustPut(t, e1, "a", []byte("1"))
+	mustPut(t, e1, "b", []byte("2"))
+	if err := e1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a crash mid-append: 6 stray bytes, fewer than a record prefix.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte{0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01}); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	e2 := openEngine(t, path)
+	if e2.recovery.DiscardedBytes != 6 {
+		t.Fatalf("discarded %d, want 6", e2.recovery.DiscardedBytes)
+	}
+	for k, want := range map[string]string{"a": "1", "b": "2"} {
+		if got, err := e2.Get(k); err != nil || string(got) != want {
+			t.Fatalf("%s: got %q err %v", k, got, err)
+		}
+	}
+	mustPut(t, e2, "c", []byte("3"))
+	if err := e2.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	e3 := openEngine(t, path) // a second restart must be clean
+	if e3.recovery.DiscardedBytes != 0 {
+		t.Fatalf("second recovery discarded %d bytes", e3.recovery.DiscardedBytes)
+	}
+	if got, err := e3.Get("c"); err != nil || string(got) != "3" {
+		t.Fatalf("c: got %q err %v", got, err)
 	}
 }
 

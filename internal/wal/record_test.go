@@ -112,7 +112,7 @@ func TestDecodeDeleteGolden(t *testing.T) {
 func TestDecodeCorruptCRC(t *testing.T) {
 	buf := mustHex(t, "FFFFFFFF | 0000000A | 01 | 00000001 61 00000001 62") // bad CRC
 	_, _, err := DecodeRecord(buf)
-	if err != ErrInvalid {
+	if err != ErrChecksum {
 		t.Fatalf("expected ErrInvalid for corrupt CRC, got %v", err)
 	}
 }
