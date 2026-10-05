@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 )
 
@@ -49,11 +48,8 @@ func Open(path string) (*WAL, error) {
 			return nil, err
 		}
 		if err := syncDir(filepath.Dir(path)); err != nil {
-			// Silently ignore directory sync errors on Windows
-			if runtime.GOOS != "windows" {
-				f.Close()
-				return nil, err
-			}
+			f.Close()
+			return nil, err
 		}
 	}
 	return &WAL{f: f}, nil

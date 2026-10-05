@@ -17,16 +17,20 @@ Status: draft. No backward-compatibility obligations before first release; any f
 
 First record starts at offset 16.
 
-## Header (16 bytes)
+## Header (20 bytes)
 
-| Offset | Size | Field      | Value / rule                         |
-| -----: | ---: | ---------- | ------------------------------------ |
-|      0 |    4 | Magic      | `52 4B 56 57` (`"RKVW"`)             |
-|      4 |    2 | Version    | `0x0001`. Any other value → reject.  |
-|      6 |    6 | Reserved   | Must be all zero. Non-zero → reject. |
-|     12 |    4 | Header CRC | CRC32C over bytes 0–11               |
+| Offset | Size | Field      | Value / rule                                              |
+| -----: | ---: | ---------- | --------------------------------------------------------- |
+|      0 |    4 | Magic      | `52 4B 56 57` (`"RKVW"`)                                  |
+|      4 |    2 | Version    | `0x0001`. Any other value → reject.                       |
+|      6 |    2 | Reserved   | Must be all zero. Non-zero → reject.                      |
+|      8 |    8 | BaseOffset | Logical offset of the first record in this file. New WAL = 0. |
+|     16 |    4 | Header CRC | CRC32C over bytes 0–15                                    |
 
-Why: magic rejects foreign files; version is the upgrade path; header CRC separates "not our file" (bad magic) from "our file, damaged" (bad CRC).
+Why: magic rejects foreign files; version is the upgrade path; header CRC
+separates "not our file" (bad magic) from "our file, damaged" (bad CRC).
+BaseOffset lets WAL truncation rewrite the file without invalidating
+logical offsets stored in snapshots.
 
 ## Record
 
@@ -103,7 +107,7 @@ Header errors: `ErrBadMagic`, `ErrUnsupportedVersion`, `ErrHeaderChecksum`, `Err
 Header:
 
 ```
-52 4B 56 57 | 00 01 | 00 00 00 00 00 00 | 5C DE F2 7B
+52 4B 56 57 | 00 01 | 00 00 | 00 00 00 00 00 00 00 00 | 08 81 32 B5
 ```
 
 `Put("a", "b")` — payload `00000001 61 00000001 62` (10 bytes), Length = `0x0000000A`:
