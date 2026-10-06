@@ -13,7 +13,7 @@ import (
 
 func buildLog(t *testing.T, recs ...Record) (data []byte, ends []int) {
 	t.Helper()
-	data = encodeHeader()
+	data = encodeHeader(0)
 	for _, r := range recs {
 		b, err := encodeRecord(r)
 		if err != nil {
@@ -43,7 +43,7 @@ func recoverAt(t *testing.T, path string) (*WAL, RecoveryResult, []Record, error
 	}
 	t.Cleanup(func() { _ = w.Close() }) // LIFO: runs before TempDir removal
 	var got []Record
-	res, err := w.Recover(func(r Record) error { got = append(got, r); return nil })
+	res, err := w.Recover(0, func(r Record) error { got = append(got, r); return nil })
 	return w, res, got, err
 }
 
@@ -167,7 +167,7 @@ func TestRecoverValidCRCBadTypeIsFatal(t *testing.T) {
 }
 
 func TestRecoverTornHeaderIsRepaired(t *testing.T) {
-	path := writeFile(t, encodeHeader()[:7])
+	path := writeFile(t, encodeHeader(0)[:7])
 	w, res, got, err := recoverAt(t, path)
 	if err != nil || len(got) != 0 || res.DiscardReason != "torn header" {
 		t.Fatalf("res=%+v err=%v", res, err)

@@ -11,7 +11,7 @@ import (
 
 // Format constants (docs/wal-format.md, v1).
 const (
-	HeaderSize   = 16
+	HeaderSize   = 20
 	FormatVer    = 0x0001
 	MaxPayload   = 16 << 20          // 16 MiB, package constant, not in header
 	MaxKeySize   = 1 << 10           // 1 KiB
@@ -49,31 +49,36 @@ type Record struct {
 	Value []byte
 }
 
-// encodeHeader returns the 16-byte file header.
-// Layout: magic(4) | version(2) | reserved(6, zero) | crc32c(bytes 0..11)(4)
-func encodeHeader() []byte {
+// encodeHeader returns the 20-byte file header.
+// Layout: magic(4) | version(2) | reserved(2, zero) | baseOffset(8) | crc32c(bytes 0..15)(4)
+//
+// baseOffset is the logical offset of the first record stored in this file
+// (0 for a newly created WAL).
+func encodeHeader(baseOffset uint64) []byte {
 	h := make([]byte, HeaderSize)
 	copy(h[0:4], magic[:])
 	binary.BigEndian.PutUint16(h[4:6], FormatVer)
-	// h[6:12] stays zero (reserved)
-	binary.BigEndian.PutUint32(h[12:16], crc32.Checksum(h[0:12], castagnoli))
+	// h[6:8] stays zero (reserved)
+	binary.BigEndian.PutUint64(h[8:16], baseOffset)
+	binary.BigEndian.PutUint32(h[16:20], crc32.Checksum(h[0:16], castagnoli))
 	return h
 }
 
-func validateHeader(h []byte) error {
+// validateHeader checks the header and returns its baseOffset.
+func validateHeader(h []byte) (uint64, error) {
 	if len(h) != HeaderSize {
-		return fmt.Errorf("%w: short header", ErrBadHeader)
+		return 0, fmt.Errorf("%w: short header", ErrBadHeader)
 	}
 	if !bytes.Equal(h[0:4], magic[:]) {
-		return fmt.Errorf("%w: bad magic", ErrBadHeader)
+		return 0, fmt.Errorf("%w: bad magic", ErrBadHeader)
 	}
 	if binary.BigEndian.Uint16(h[4:6]) != FormatVer {
-		return fmt.Errorf("%w: unsupported version", ErrBadHeader)
+		return 0, fmt.Errorf("%w: unsupported version", ErrBadHeader)
 	}
-	if binary.BigEndian.Uint32(h[12:16]) != crc32.Checksum(h[0:12], castagnoli) {
-		return fmt.Errorf("%w: header checksum", ErrBadHeader)
+	if binary.BigEndian.Uint32(h[16:20]) != crc32.Checksum(h[0:16], castagnoli) {
+		return 0, fmt.Errorf("%w: header checksum", ErrBadHeader)
 	}
-	return nil
+	return binary.BigEndian.Uint64(h[8:16]), nil
 }
 
 // encodeRecord builds one record as a single contiguous buffer:

@@ -11,12 +11,17 @@ import (
 	"sync"
 )
 
-var ErrBroken = errors.New("wal: broken after failed write/sync; restart required")
+var (
+	ErrBroken    = errors.New("wal: broken after failed write/sync; restart required")
+	ErrBadOffset = errors.New("wal: replay offset out of range")
+)
 
 type WAL struct {
-	mu     sync.Mutex
-	f      *os.File
-	broken error
+	mu         sync.Mutex
+	f          *os.File
+	broken     error
+	baseOffset uint64 // logical offset of the first record in the file (from header)
+	logicalEnd uint64 // logical offset just past the last durable record
 }
 
 type RecoveryResult struct {
@@ -39,7 +44,7 @@ func Open(path string) (*WAL, error) {
 		return nil, err
 	}
 	if st.Size() == 0 {
-		if _, err := f.Write(encodeHeader()); err != nil { // from your spec
+		if _, err := f.Write(encodeHeader(0)); err != nil { // from your spec
 			f.Close()
 			return nil, err
 		}
@@ -74,12 +79,15 @@ func (w *WAL) Append(rec Record) error {
 		w.broken = fmt.Errorf("%w: sync: %v", ErrBroken, err)
 		return w.broken
 	}
+	w.logicalEnd += uint64(len(buf))
 	return nil
 }
 
-// Recover replays the log through fn and repairs a torn tail.
-// It must complete before the first Append.
-func (w *WAL) Recover(fn func(Record) error) (RecoveryResult, error) {
+// Recover replays records at logical offset >= from through fn and repairs a
+// torn tail. Pass 0 for a full replay, or the snapshot's WALOffset.
+// `from` must be a record boundary (callers only pass offsets captured at
+// one). It must complete before the first Append.
+func (w *WAL) Recover(from uint64, fn func(Record) error) (RecoveryResult, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.broken != nil {
@@ -95,43 +103,60 @@ func (w *WAL) Recover(fn func(Record) error) (RecoveryResult, error) {
 	// A header that is a strict prefix of the expected one means we crashed
 	// while creating the file. Nothing could have been acknowledged.
 	if size < HeaderSize {
+		if from != 0 { // a snapshot cannot cover records in a WAL that has none
+			return RecoveryResult{}, fmt.Errorf("%w: from=%d but WAL has no records", ErrBadOffset, from)
+		}
 		existing := make([]byte, size)
 		if _, err := w.f.ReadAt(existing, 0); err != nil && err != io.EOF {
 			return RecoveryResult{}, err
 		}
-		if !bytes.Equal(existing, encodeHeader()[:size]) {
+		if !bytes.Equal(existing, encodeHeader(0)[:size]) {
 			return RecoveryResult{}, fmt.Errorf("%w: short file is not a header prefix", ErrBadHeader)
 		}
 		if err := w.f.Truncate(0); err != nil {
 			return RecoveryResult{}, err
 		}
-		if _, err := w.f.Write(encodeHeader()); err != nil { // O_APPEND: lands at 0
+		if _, err := w.f.Write(encodeHeader(0)); err != nil { // O_APPEND: lands at 0
 			return RecoveryResult{}, err
 		}
 		if err := w.f.Sync(); err != nil {
 			return RecoveryResult{}, err
 		}
+		w.baseOffset = 0
+		w.setLogicalEnd(HeaderSize)
 		return RecoveryResult{GoodOffset: HeaderSize, DiscardedBytes: size,
 			DiscardReason: "torn header"}, nil
 	}
 
-	if _, err := w.f.Seek(0, io.SeekStart); err != nil {
+	var hdr [HeaderSize]byte
+	if _, err := io.ReadFull(io.NewSectionReader(w.f, 0, HeaderSize), hdr[:]); err != nil {
+		return RecoveryResult{}, fmt.Errorf("recover: read header: %w", err)
+	}
+	base, err := validateHeader(hdr[:])
+	if err != nil {
+		return RecoveryResult{}, err
+	}
+	w.baseOffset = base
+
+	// Range check, including any torn tail still in the file. from < base
+	// would underflow below, so it is checked first.
+	fileEnd := base + uint64(size-HeaderSize)
+	if from < base || from > fileEnd {
+		return RecoveryResult{}, fmt.Errorf("%w: from=%d, WAL covers [%d, %d]",
+			ErrBadOffset, from, base, fileEnd)
+	}
+
+	start := int64(HeaderSize) + int64(from-base) // safe: from-base <= size
+	if _, err := w.f.Seek(start, io.SeekStart); err != nil {
 		return RecoveryResult{}, err
 	}
 	br := bufio.NewReaderSize(w.f, 64*1024) // batches syscalls only
 
-	var hdr [HeaderSize]byte
-	if _, err := io.ReadFull(br, hdr[:]); err != nil {
-		return RecoveryResult{}, fmt.Errorf("recover: read header: %w", err)
-	}
-	if err := validateHeader(hdr[:]); err != nil {
-		return RecoveryResult{}, err
-	}
-
-	res := RecoveryResult{GoodOffset: HeaderSize}
+	res := RecoveryResult{GoodOffset: start}
 	for {
 		rec, n, err := ReadRecord(br)
 		if err == io.EOF {
+			w.setLogicalEnd(res.GoodOffset)
 			return res, nil // clean end at a record boundary
 		}
 		if err != nil {
@@ -152,6 +177,7 @@ func (w *WAL) Recover(fn func(Record) error) (RecoveryResult, error) {
 			}
 			res.DiscardedBytes = size - res.GoodOffset
 			res.DiscardReason = reason
+			w.setLogicalEnd(res.GoodOffset)
 			return res, nil
 		}
 		if err := fn(rec); err != nil {
@@ -209,6 +235,18 @@ func (w *WAL) allZeroFrom(off, size int64) (bool, error) {
 		off += int64(m)
 	}
 	return true, nil
+}
+
+// LogicalEnd returns the logical offset just past the last durable record.
+// Valid for a new WAL immediately, and for an existing one after Recover.
+func (w *WAL) LogicalEnd() uint64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.logicalEnd
+}
+
+func (w *WAL) setLogicalEnd(goodPhysical int64) {
+	w.logicalEnd = w.baseOffset + uint64(goodPhysical-HeaderSize)
 }
 
 // Close closes the underlying file.

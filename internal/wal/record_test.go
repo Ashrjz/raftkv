@@ -3,6 +3,7 @@ package wal
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"hash/crc32"
 	"strings"
 	"testing"
@@ -17,6 +18,15 @@ func mustHex(t *testing.T, s string) []byte {
 	return b
 }
 
+func hexOf(t *testing.T, parts ...string) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(strings.Join(parts, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 func TestCRC32CSanity(t *testing.T) {
 	// Proves we're using Castagnoli, not IEEE.
 	if got := crc32.Checksum([]byte("123456789"), castagnoli); got != 0xE3069283 {
@@ -24,10 +34,55 @@ func TestCRC32CSanity(t *testing.T) {
 	}
 }
 
-func TestEncodeHeaderGolden(t *testing.T) {
-	want := mustHex(t, "524B5657 | 0001 | 000000000000 | 5CDEF27B")
-	if got := encodeHeader(); !bytes.Equal(got, want) {
-		t.Fatalf("got %x want %x", got, want)
+func TestHeaderGolden(t *testing.T) {
+	tests := []struct {
+		name string
+		base uint64
+		want []byte
+	}{
+		{"base0", 0, hexOf(t, "524B5657", "0001", "0000", "0000000000000000", "088132B5")},
+		{"base256", 256, hexOf(t, "524B5657", "0001", "0000", "0000000000000100", "1B23AAC2")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := encodeHeader(tt.base)
+			if !bytes.Equal(got, tt.want) {
+				t.Fatalf("encode mismatch:\n got  %X\n want %X", got, tt.want)
+			}
+			base, err := validateHeader(tt.want)
+			if err != nil || base != tt.base {
+				t.Fatalf("validate: base=%d err=%v, want base=%d", base, err, tt.base)
+			}
+		})
+	}
+}
+
+func TestHeaderRoundTrip(t *testing.T) {
+	for _, base := range []uint64{0, 1, 4096, 1 << 40, ^uint64(0)} {
+		got, err := validateHeader(encodeHeader(base))
+		if err != nil || got != base {
+			t.Fatalf("base %d: got %d err=%v", base, got, err)
+		}
+	}
+}
+
+func TestHeaderRejectsAnyFlippedByte(t *testing.T) {
+	good := encodeHeader(256)
+	for i := 0; i < HeaderSize; i++ {
+		h := append([]byte(nil), good...)
+		h[i] ^= 0xFF
+		if _, err := validateHeader(h); !errors.Is(err, ErrBadHeader) {
+			t.Errorf("byte %d flipped: err=%v, want ErrBadHeader", i, err)
+		}
+	}
+}
+
+func TestHeaderRejectsWrongSize(t *testing.T) {
+	good := encodeHeader(0)
+	for _, h := range [][]byte{nil, good[:HeaderSize-1], good[:16], append(good, 0)} {
+		if _, err := validateHeader(h); !errors.Is(err, ErrBadHeader) {
+			t.Errorf("len %d: err=%v, want ErrBadHeader", len(h), err)
+		}
 	}
 }
 

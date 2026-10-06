@@ -23,7 +23,7 @@ func NewEngine(walPath string) (*Engine, error) {
 	mem := NewMemStore()
 
 	// Replay the WAL to reconstruct state
-	res, err := w.Recover(func(rec wal.Record) error {
+	res, err := w.Recover(0, func(rec wal.Record) error {
 		switch rec.Type {
 		case wal.TypePut:
 			return mem.Put(string(rec.Key), rec.Value)
