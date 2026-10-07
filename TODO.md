@@ -18,7 +18,7 @@
 - [x] Implement WAL append-on-write, `fsync` per write
 - [x] Implement WAL replay on startup (rebuild map from log)
 - [x] Handle torn/partial last record on recovery (detect + discard)
-- [ ] Implement snapshotting (dump map to disk)
+- [x] Implement snapshotting (dump map to disk)
 - [ ] Implement WAL truncation after snapshot
 - [ ] Handle concurrent reads during snapshot (RWMutex or copy-on-write)
 - [ ] Benchmark: fsync-per-write vs batched/group commit

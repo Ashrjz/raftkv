@@ -38,6 +38,14 @@ func (s *MemStore) Delete(key string) error {
 	return nil
 }
 
+// withData runs fn with the underlying map under a read lock.
+// fn must not modify or retain the map.
+func (m *MemStore) withData(fn func(map[string][]byte) error) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return fn(m.data)
+}
+
 func clone(b []byte) []byte {
 	if b == nil {
 		return nil
