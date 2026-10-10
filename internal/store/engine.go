@@ -10,10 +10,16 @@ import (
 
 // Engine wraps an in-memory Store with a WAL for write-ahead durability.
 type Engine struct {
-	mu       sync.Mutex // serializes writes (WAL append + apply) and snapshots
-	mem      *MemStore
-	wal      *wal.WAL
-	dir      string // directory holding the WAL and snapshot
+	mu     sync.Mutex // serializes writes (WAL append + apply) and the snapshot capture
+	snapMu sync.Mutex // one Snapshot() at a time. Lock order: snapMu, then mu.
+	mem    *MemStore
+	wal    *wal.WAL
+	dir    string // directory holding the WAL and snapshot
+
+	// Test seam: how the snapshot file is written. Always wal.WriteSnapshot
+	// in production; tests replace it to stall or fail the write.
+	writeSnapshot func(dir string, data map[string][]byte, walOffset uint64) error
+
 	recovery wal.RecoveryResult
 }
 
@@ -61,7 +67,10 @@ func NewEngine(walPath string) (*Engine, error) {
 		return nil, err
 	}
 
-	return &Engine{mem: mem, wal: w, dir: dir, recovery: res}, nil
+	return &Engine{
+		mem: mem, wal: w, dir: dir, recovery: res,
+		writeSnapshot: wal.WriteSnapshot,
+	}, nil
 }
 
 // Get reads directly from the in-memory state (fast read path).
@@ -109,18 +118,26 @@ func (e *Engine) Delete(key string) error {
 }
 
 // Snapshot writes the current state to disk, then drops the WAL records the
-// snapshot covers. Writes are blocked for the duration (reads are not).
+// snapshot covers.
+//
+// Writers are blocked only while the in-memory map is copied. The file write,
+// fsync, rename and WAL truncation all happen without the engine lock, so
+// writes made meanwhile land in the WAL after the captured offset and are
+// preserved by the truncation as the new WAL tail.
 func (e *Engine) Snapshot() error {
+	// Two snapshots racing could let an older one replace a newer one after
+	// the WAL was already truncated past it, which makes the next startup fail.
+	e.snapMu.Lock()
+	defer e.snapMu.Unlock()
+
+	// Capture. Every write holds e.mu across "append to WAL + apply to memory",
+	// so the copy and the offset describe the same instant.
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	// One offset, captured once: the snapshot and the truncation must agree.
+	data := e.mem.clone()
 	offset := e.wal.LogicalEnd()
+	e.mu.Unlock()
 
-	err := e.mem.withData(func(data map[string][]byte) error {
-		return wal.WriteSnapshot(e.dir, data, offset)
-	})
-	if err != nil {
+	if err := e.writeSnapshot(e.dir, data, offset); err != nil {
 		return err // any snapshot error means: do NOT truncate
 	}
 
@@ -132,7 +149,10 @@ func (e *Engine) Snapshot() error {
 	return nil
 }
 
+// Close waits for an in-flight Snapshot, then closes the WAL.
 func (e *Engine) Close() error {
+	e.snapMu.Lock()
+	defer e.snapMu.Unlock()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.wal.Close()

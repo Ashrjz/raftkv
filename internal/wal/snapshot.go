@@ -33,9 +33,10 @@ var ErrBadSnapshot = errors.New("wal: invalid snapshot")
 // WriteSnapshot atomically writes data and walOffset as the current snapshot
 // in dir: write tmp, fsync, rename, fsync dir.
 //
-// The caller must hold the engine lock for the whole call so that data and
-// walOffset (from WAL.LogicalEnd) describe the same instant, and must not
-// mutate data while this runs. data is only read.
+// The caller must capture data and walOffset (from WAL.LogicalEnd) together
+// under the engine lock so they describe the same instant, then pass data as
+// a private copy: it is only read here, and must not be mutated during the
+// call. The engine lock need not be held while this runs.
 //
 // If an error is returned after the rename (directory fsync failed), the new
 // snapshot may or may not be durable. The caller must treat the snapshot as

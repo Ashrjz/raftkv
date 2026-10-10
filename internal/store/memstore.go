@@ -38,6 +38,20 @@ func (s *MemStore) Delete(key string) error {
 	return nil
 }
 
+// clone returns a copy of the map taken under the read lock. Values are
+// shared with the live map, which is safe because Put stores a private copy
+// of each value and Get returns a copy: a stored slice is never mutated or
+// handed out, only replaced or removed.
+func (m *MemStore) clone() map[string][]byte {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	c := make(map[string][]byte, len(m.data))
+	for k, v := range m.data {
+		c[k] = v
+	}
+	return c
+}
+
 // withData runs fn with the underlying map under a read lock.
 // fn must not modify or retain the map.
 func (m *MemStore) withData(fn func(map[string][]byte) error) error {
