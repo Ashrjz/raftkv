@@ -67,7 +67,7 @@ func Open(path string) (*WAL, error) {
 			return nil, err
 		}
 	}
-	return &WAL{f: f}, nil
+	return &WAL{f: f, path: path}, nil
 }
 
 // Append makes the record durable before returning nil.
