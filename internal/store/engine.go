@@ -108,16 +108,28 @@ func (e *Engine) Delete(key string) error {
 	return e.mem.Delete(key)
 }
 
-// Snapshot writes the current state to disk. Writes are blocked for the
-// duration (reads are not); the map and the WAL offset are captured together.
-// The WAL is not truncated here.
+// Snapshot writes the current state to disk, then drops the WAL records the
+// snapshot covers. Writes are blocked for the duration (reads are not).
 func (e *Engine) Snapshot() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	return e.mem.withData(func(data map[string][]byte) error {
-		return wal.WriteSnapshot(e.dir, data, e.wal.LogicalEnd())
+	// One offset, captured once: the snapshot and the truncation must agree.
+	offset := e.wal.LogicalEnd()
+
+	err := e.mem.withData(func(data map[string][]byte) error {
+		return wal.WriteSnapshot(e.dir, data, offset)
 	})
+	if err != nil {
+		return err // any snapshot error means: do NOT truncate
+	}
+
+	if err := e.wal.TruncateBefore(offset); err != nil {
+		// The snapshot is durable and the WAL still consistent; the next
+		// Snapshot() retries the truncation.
+		return fmt.Errorf("snapshot written but WAL truncation failed: %w", err)
+	}
+	return nil
 }
 
 func (e *Engine) Close() error {

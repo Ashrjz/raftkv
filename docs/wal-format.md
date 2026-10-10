@@ -102,6 +102,28 @@ Header errors: `ErrBadMagic`, `ErrUnsupportedVersion`, `ErrHeaderChecksum`, `Err
 - **One record = one contiguous buffer = one `write()` call.** Build `Length | Type | Payload`, compute CRC, prepend. This shrinks the torn-write window; it does not eliminate it, which is why the CRC exists.
 - **Header init:** on a 0-byte file, write header, `fsync` the file, then `fsync` the **parent directory** so the file's existence is durable. Only then accept records.
 
+## Truncation
+
+After a snapshot with `WALOffset = S` is durable, records before S are
+redundant. Truncation rewrites the WAL so its first record is the one at S:
+
+1. Create `<wal>.tmp`; write a header with `BaseOffset = S`.
+2. Copy all record bytes from logical offset S to the logical end.
+3. `fsync` the tmp file.
+4. `rename` it over the WAL.
+5. `fsync` the parent directory.
+
+Rules:
+- Truncation starts only after the snapshot (file, rename, directory fsync)
+  is fully durable. Any snapshot error means no truncation.
+- Logical offsets never change, so a snapshot stays valid before, during and
+  after truncation. A crash at any step leaves either the old WAL or the new
+  one, and recovery (`Recover(from)`) is correct for both.
+- A directory-fsync failure after the rename marks the WAL broken: appends
+  after the rename must not be acknowledged until the rename is durable.
+- `<wal>.tmp` is deleted on open; it only exists if a crash happened before
+  the rename.
+
 ## Worked example (golden test vectors)
 
 Header:

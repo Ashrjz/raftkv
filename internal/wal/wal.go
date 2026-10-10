@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -16,9 +17,12 @@ var (
 	ErrBadOffset = errors.New("wal: replay offset out of range")
 )
 
+const walTmpSuffix = ".tmp"
+
 type WAL struct {
 	mu         sync.Mutex
 	f          *os.File
+	path       string // needed to rewrite the file during truncation
 	broken     error
 	baseOffset uint64 // logical offset of the first record in the file (from header)
 	logicalEnd uint64 // logical offset just past the last durable record
@@ -34,6 +38,12 @@ type RecoveryResult struct {
 // Open creates a new WAL (header + fsync + dir fsync) or opens an existing one.
 // NOTE: for an existing non-empty file, run replay + torn-tail truncation
 func Open(path string) (*WAL, error) {
+	// A leftover tmp file comes from a truncation that crashed before its
+	// rename. The real WAL is intact, so the tmp file is just garbage.
+	if err := os.Remove(path + walTmpSuffix); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, err
@@ -186,6 +196,80 @@ func (w *WAL) Recover(from uint64, fn func(Record) error) (RecoveryResult, error
 		res.Records++
 		res.GoodOffset += int64(n)
 	}
+}
+
+// TruncateBefore rewrites the WAL so its first record is the one at logical
+// offset upTo, dropping everything before it. Logical offsets do not change
+// (BaseOffset in the new header becomes upTo), so any offset a snapshot
+// stored stays valid.
+//
+// Preconditions: Recover has completed (or the WAL is new), upTo is a record
+// boundary (callers pass a value obtained from LogicalEnd), and
+// BaseOffset <= upTo <= LogicalEnd. Call it only after the snapshot covering
+// upTo is fully durable (WriteSnapshot returned nil).
+//
+// Failure before the rename leaves the WAL untouched and usable. Failure of
+// the final directory fsync marks the WAL broken: the new file is already
+// in use, and acknowledging appends before the rename is durable could lose
+// them on a crash.
+func (w *WAL) TruncateBefore(upTo uint64) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.broken != nil {
+		return w.broken
+	}
+	if upTo < w.baseOffset || upTo > w.logicalEnd {
+		return fmt.Errorf("%w: truncate to %d, WAL covers [%d, %d]",
+			ErrBadOffset, upTo, w.baseOffset, w.logicalEnd)
+	}
+	if upTo == w.baseOffset {
+		return nil // nothing to drop
+	}
+
+	tmpPath := w.path + walTmpSuffix
+	tmp, err := os.OpenFile(tmpPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	fail := func(err error) error {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+
+	// New file = header(BaseOffset=upTo) + the records from upTo onward.
+	if _, err := tmp.Write(encodeHeader(upTo)); err != nil {
+		return fail(err)
+	}
+	start := int64(HeaderSize) + int64(upTo-w.baseOffset)
+	tailLen := int64(w.logicalEnd - upTo)
+	n, err := io.Copy(tmp, io.NewSectionReader(w.f, start, tailLen))
+	if err != nil {
+		return fail(err)
+	}
+	if n != tailLen {
+		return fail(fmt.Errorf("wal: truncate copied %d of %d tail bytes", n, tailLen))
+	}
+	if err := tmp.Sync(); err != nil {
+		return fail(err)
+	}
+
+	if err := os.Rename(tmpPath, w.path); err != nil {
+		return fail(err) // nothing changed; old WAL still in place
+	}
+
+	// Point of no return: the path now names the new file. Switch handles
+	// first so no append can reach the unlinked old file.
+	old := w.f
+	w.f = tmp
+	w.baseOffset = upTo
+	old.Close()
+
+	if err := syncDir(filepath.Dir(w.path)); err != nil {
+		w.broken = fmt.Errorf("%w: sync dir after truncate: %v", ErrBroken, err)
+		return w.broken
+	}
+	return nil
 }
 
 // isTornTail implements the table above. off is where the failed record
