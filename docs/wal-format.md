@@ -145,3 +145,19 @@ B7 62 2D 95 | 00 00 00 0A | 01 | 00 00 00 01 61 00 00 00 01 62
 ```
 
 Sanity check for CRC32C implementation: `CRC32C("123456789") = 0xE3069283`.
+
+## Benchmark
+```cmd
+goos: linux
+goarch: amd64
+pkg: github.com/Ashrjz/raftkv/internal/wal
+cpu: AMD Ryzen 7 6800HS with Radeon Graphics        
+BenchmarkAppend/sync/goroutines=1-16                1125           2151056 ns/op                 1.000 records/fsync
+BenchmarkAppend/sync/goroutines=8-16                1088           2264609 ns/op                 1.000 records/fsync
+BenchmarkAppend/sync/goroutines=64-16               1197           2139492 ns/op                 1.000 records/fsync
+BenchmarkAppend/group/goroutines=1-16               1165           2215558 ns/op                 1.000 records/fsync
+BenchmarkAppend/group/goroutines=8-16               4365            537076 ns/op                 4.023 records/fsync
+BenchmarkAppend/group/goroutines=64-16             29986             77397 ns/op                32.70 records/fsync
+PASS
+ok      github.com/Ashrjz/raftkv/internal/wal   16.507s
+```

@@ -10,14 +10,31 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 )
 
 var (
 	ErrBroken    = errors.New("wal: broken after failed write/sync; restart required")
 	ErrBadOffset = errors.New("wal: replay offset out of range")
+	ErrClosed    = errors.New("wal: closed")
 )
 
-const walTmpSuffix = ".tmp"
+const (
+	walTmpSuffix = ".tmp"
+	maxBatch     = 256 // maxBatch caps how many queued records one fsync will cover.
+)
+
+type Option func(*WAL)
+
+// WithGroupCommit makes concurrent Appends share fsyncs: while one fsync runs,
+// other callers queue up, and the next fsync makes the whole queue durable.
+// Every Append still returns only after its own record is durable.
+func WithGroupCommit() Option { return func(w *WAL) { w.group = true } }
+
+type commitReq struct {
+	buf  []byte
+	done chan error
+}
 
 type WAL struct {
 	mu         sync.Mutex
@@ -26,6 +43,17 @@ type WAL struct {
 	broken     error
 	baseOffset uint64 // logical offset of the first record in the file (from header)
 	logicalEnd uint64 // logical offset just past the last durable record
+
+	// group commit (only used when group is true)
+	group     bool
+	reqs      chan commitReq // unbuffered: a successful send means the committer owns the request
+	quit      chan struct{}  // w.Close() closes this channel
+	stopped   chan struct{}  //
+	closeOnce sync.Once
+
+	// fsync statistics, for benchmarks and later metrics
+	batches atomic.Uint64
+	records atomic.Uint64
 }
 
 type RecoveryResult struct {
@@ -37,7 +65,7 @@ type RecoveryResult struct {
 
 // Open creates a new WAL (header + fsync + dir fsync) or opens an existing one.
 // NOTE: for an existing non-empty file, run replay + torn-tail truncation
-func Open(path string) (*WAL, error) {
+func Open(path string, opts ...Option) (*WAL, error) {
 	// A leftover tmp file comes from a truncation that crashed before its
 	// rename. The real WAL is intact, so the tmp file is just garbage.
 	if err := os.Remove(path + walTmpSuffix); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -67,7 +95,18 @@ func Open(path string) (*WAL, error) {
 			return nil, err
 		}
 	}
-	return &WAL{f: f, path: path}, nil
+
+	w := &WAL{f: f, path: path}
+	for _, o := range opts {
+		o(w)
+	}
+	if w.group {
+		w.reqs = make(chan commitReq)
+		w.quit = make(chan struct{})
+		w.stopped = make(chan struct{})
+		go w.committer()
+	}
+	return w, nil
 }
 
 // Append makes the record durable before returning nil.
@@ -75,6 +114,9 @@ func (w *WAL) Append(rec Record) error {
 	buf, err := encodeRecord(rec) // enforces your size limits, one contiguous buffer
 	if err != nil {
 		return err // nothing written; WAL still healthy
+	}
+	if w.group {
+		return w.appendGrouped(buf)
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -90,6 +132,8 @@ func (w *WAL) Append(rec Record) error {
 		return w.broken
 	}
 	w.logicalEnd += uint64(len(buf))
+	w.batches.Add(1)
+	w.records.Add(1)
 	return nil
 }
 
@@ -272,6 +316,80 @@ func (w *WAL) TruncateBefore(upTo uint64) error {
 	return nil
 }
 
+func (w *WAL) appendGrouped(buf []byte) error {
+	req := commitReq{buf: buf, done: make(chan error, 1)}
+	select {
+	case w.reqs <- req: // the channel is unbuffered, so the committer has it
+	case <-w.quit:
+		return ErrClosed
+	}
+	return <-req.done
+}
+
+// committer is the only goroutine that writes in group mode. It takes one
+// request, then grabs whatever else is already waiting (without blocking) and
+// commits all of it with a single write and a single fsync.
+func (w *WAL) committer() {
+	defer close(w.stopped)
+	for {
+		var batch []commitReq
+		select {
+		case r := <-w.reqs:
+			batch = append(batch, r)
+		case <-w.quit:
+			return
+		}
+	drain:
+		for len(batch) < maxBatch {
+			select {
+			case r := <-w.reqs:
+				batch = append(batch, r)
+			default:
+				break drain
+			}
+		}
+		err := w.commitBatch(batch)
+		for _, r := range batch {
+			r.done <- err
+		}
+	}
+}
+
+func (w *WAL) commitBatch(batch []commitReq) error {
+	total := 0
+	for _, r := range batch {
+		total += len(r.buf)
+	}
+	buf := make([]byte, 0, total)
+	for _, r := range batch {
+		buf = append(buf, r.buf...)
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.broken != nil {
+		return w.broken
+	}
+	if _, err := w.f.Write(buf); err != nil {
+		w.broken = fmt.Errorf("%w: write: %v", ErrBroken, err)
+		return w.broken
+	}
+	if err := w.f.Sync(); err != nil {
+		w.broken = fmt.Errorf("%w: sync: %v", ErrBroken, err)
+		return w.broken
+	}
+	w.logicalEnd += uint64(total)
+	w.batches.Add(1)
+	w.records.Add(uint64(len(batch)))
+	return nil
+}
+
+// Stats returns how many fsyncs (batches) have been issued and how many
+// records they covered. records/batches is the average batch size.
+func (w *WAL) Stats() (batches, records uint64) {
+	return w.batches.Load(), w.records.Load()
+}
+
 // isTornTail implements the table above. off is where the failed record
 // starts, consumed is how many bytes ReadRecord took from the stream.
 func (w *WAL) isTornTail(err error, off, consumed, size int64) (bool, string, error) {
@@ -335,6 +453,10 @@ func (w *WAL) setLogicalEnd(goodPhysical int64) {
 
 // Close closes the underlying file.
 func (w *WAL) Close() error {
+	if w.group {
+		w.closeOnce.Do(func() { close(w.quit) })
+		<-w.stopped // no batch is in flight once this returns
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.f == nil {
