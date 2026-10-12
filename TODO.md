@@ -22,8 +22,8 @@
 - [x] Implement WAL truncation after snapshot
 - [x] Handle concurrent reads during snapshot (RWMutex or copy-on-write)
 - [x] Benchmark: fsync-per-write vs batched/group commit
-- [ ] **Test:** kill -9 test harness (random-point process kill + restart + verify)
-- [ ] **Acceptance:** no acknowledged write lost across N kill-9 runs
+- [x] **Test:** kill -9 test harness (random-point process kill + restart + verify)
+- [x] **Acceptance:** no acknowledged write lost across N kill-9 runs
 - [ ] **Acceptance:** recovery time scales with WAL-since-snapshot, not total data
 
 ---

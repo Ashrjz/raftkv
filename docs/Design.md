@@ -1,4 +1,4 @@
-# raftkv design (v0)
+# raftkv design
 
 Status: draft v0. Deliberately basic; revise as decisions change.
 
@@ -9,7 +9,7 @@ A distributed, replicated key-value store in Go, built on Raft, as a learning pr
 
 **Out of scope for now** (later phases): Raft snapshots/compaction, membership changes, linearizable reads, fault-injection harness, idempotency/CAS, observability, sharding.
 
-## 2. Supported operations (v1)
+## 2. Supported operations
 - `Get(key)`, `Put(key, value)`, `Delete(key)`
 - Keys and values are `[]byte`
 - Later (Phase 4): compare-and-swap with per-key versions
@@ -27,7 +27,7 @@ A distributed, replicated key-value store in Go, built on Raft, as a learning pr
 - `fsync` really persists data.
 - The cluster is available only while a majority of nodes are up and connected (3 nodes tolerate 1 failure, 5 tolerate 2).
 
-## 5. Non-goals (v1)
+## 5. Non-goals
 - Multi-key transactions and cross-shard atomicity
 - Authentication and TLS
 - Watches, TTLs, range scans
@@ -54,5 +54,11 @@ The state machine (the key-value map) is separate from Raft. Raft hands it commi
 | Raft core style    | Direct, with `Transport`/`Storage` interfaces | I/O-free state machine (etcd's `Ready` loop) | Closest to Figure 2, fastest path to replication; interfaces keep testing and fault injection possible. Trade-off: timing-dependent tests are harder to make deterministic |
 | Linearizable reads | Deferred                                      | ReadIndex, leader lease                      | Needs working replication first                                                                                                                                            |
 
-## 8. Change log
-- v0: chose direct-style Raft core; scoped current work to Phase 3 Log Replication.
+
+## TestKill9
+```cmd
+=== RUN   TestKill9
+    kill9_test.go:323: kill9: seed=1791842535160236187 runs=200 maxdelay=300ms (re-run with -kill9.seed=1791842535160236187)
+    kill9_test.go:404: kill9 summary: 200 runs, 329912 acknowledged ops, 13308 snapshots completed; kills during startup=3, during a snapshot=24; in-flight op landed=26; torn tails repaired=44
+--- PASS: TestKill9 (40.81s)
+```
