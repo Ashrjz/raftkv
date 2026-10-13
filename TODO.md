@@ -24,7 +24,7 @@
 - [x] Benchmark: fsync-per-write vs batched/group commit
 - [x] **Test:** kill -9 test harness (random-point process kill + restart + verify)
 - [x] **Acceptance:** no acknowledged write lost across N kill-9 runs
-- [ ] **Acceptance:** recovery time scales with WAL-since-snapshot, not total data
+- [x] **Acceptance:** recovery time scales with WAL-since-snapshot, not total data
 
 ---
 
