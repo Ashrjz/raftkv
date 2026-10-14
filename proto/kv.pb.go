@@ -307,7 +307,7 @@ const file_proto_kv_proto_rawDesc = "" +
 	"\x02KV\x12,\n" +
 	"\x03Get\x12\x11.kv.v1.GetRequest\x1a\x12.kv.v1.GetResponse\x12,\n" +
 	"\x03Put\x12\x11.kv.v1.PutRequest\x1a\x12.kv.v1.PutResponse\x125\n" +
-	"\x06Delete\x12\x14.kv.v1.DeleteRequest\x1a\x15.kv.v1.DeleteResponseB\x19Z\x17kvstore/proto/kvpb;kvpbb\x06proto3"
+	"\x06Delete\x12\x14.kv.v1.DeleteRequest\x1a\x15.kv.v1.DeleteResponseB*Z(github.com/Ashrjz/raftkv/proto/kvpb;kvpbb\x06proto3"
 
 var (
 	file_proto_kv_proto_rawDescOnce sync.Once

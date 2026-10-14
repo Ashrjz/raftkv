@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package kv.v1;
 
-option go_package = "kvstore/proto/kvpb;kvpb";
+option go_package = "github.com/Ashrjz/raftkv/proto/kvpb;kvpb";
 
 service KV {
   rpc Get(GetRequest) returns (GetResponse);
