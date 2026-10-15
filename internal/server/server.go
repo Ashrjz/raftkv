@@ -2,16 +2,18 @@ package server
 
 import (
 	"context"
+	"errors"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/Ashrjz/raftkv/internal/store"
 	kvpb "github.com/Ashrjz/raftkv/proto"
 )
 
-// Store is what the server needs from storage.
+// Store is what the server needs from storage; store.Store satisfies it.
 type Store interface {
-	Get(key string) (value []byte, found bool, err error)
+	Get(key string) ([]byte, error)
 	Put(key string, value []byte) error
 	Delete(key string) error
 }
@@ -27,11 +29,15 @@ func (s *Server) Get(ctx context.Context, req *kvpb.GetRequest) (*kvpb.GetRespon
 	if err := validate(ctx, req.Key); err != nil {
 		return nil, err
 	}
-	v, found, err := s.store.Get(req.Key)
-	if err != nil {
+	v, err := s.store.Get(req.Key)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		// Absence is a normal outcome, reported via the flag, not a gRPC error.
+		return &kvpb.GetResponse{Found: false}, nil
+	case err != nil:
 		return nil, status.Errorf(codes.Internal, "get: %v", err)
 	}
-	return &kvpb.GetResponse{Value: v, Found: found}, nil
+	return &kvpb.GetResponse{Value: v, Found: true}, nil
 }
 
 func (s *Server) Put(ctx context.Context, req *kvpb.PutRequest) (*kvpb.PutResponse, error) {

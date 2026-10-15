@@ -157,3 +157,5 @@ func (e *Engine) Close() error {
 	defer e.mu.Unlock()
 	return e.wal.Close()
 }
+
+func (e *Engine) Recovery() wal.RecoveryResult { return e.recovery }
