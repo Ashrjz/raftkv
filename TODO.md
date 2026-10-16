@@ -29,12 +29,12 @@
 ---
 
 ## Phase 2: Networking Layer
-- [ ] Define proto file: Get / Put / Delete RPCs
-- [ ] Implement gRPC server wrapping Phase 1 storage
-- [ ] Implement gRPC client library
-- [ ] Add `context.WithTimeout` on every client call
-- [ ] Add server-side concurrency limit / semaphore (backpressure)
-- [ ] Implement graceful shutdown (drain in-flight, reject new, deadline)
+- [x] Define proto file: Get / Put / Delete RPCs
+- [x] Implement gRPC server wrapping Phase 1 storage
+- [x] Implement gRPC client library
+- [x] Add `context.WithTimeout` on every client call
+- [x] Add server-side concurrency limit / semaphore (backpressure)
+- [x] Implement graceful shutdown (drain in-flight, reject new, deadline)
 - [ ] **Benchmark:** p99 latency at target load (pick a number, hit it)
 - [ ] **Test:** shutdown mid-load, verify no dropped in-flight requests
 
