@@ -65,10 +65,10 @@ func (x *GetRequest) GetKey() string {
 	return ""
 }
 
+// A missing key is reported as status NotFound, not in the message.
 type GetResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Value         []byte                 `protobuf:"bytes,1,opt,name=value,proto3" json:"value,omitempty"`
-	Found         bool                   `protobuf:"varint,2,opt,name=found,proto3" json:"found,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -108,13 +108,6 @@ func (x *GetResponse) GetValue() []byte {
 		return x.Value
 	}
 	return nil
-}
-
-func (x *GetResponse) GetFound() bool {
-	if x != nil {
-		return x.Found
-	}
-	return false
 }
 
 type PutRequest struct {
@@ -285,6 +278,78 @@ func (*DeleteResponse) Descriptor() ([]byte, []int) {
 	return file_proto_kv_proto_rawDescGZIP(), []int{5}
 }
 
+type SnapshotRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SnapshotRequest) Reset() {
+	*x = SnapshotRequest{}
+	mi := &file_proto_kv_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SnapshotRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SnapshotRequest) ProtoMessage() {}
+
+func (x *SnapshotRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_kv_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SnapshotRequest.ProtoReflect.Descriptor instead.
+func (*SnapshotRequest) Descriptor() ([]byte, []int) {
+	return file_proto_kv_proto_rawDescGZIP(), []int{6}
+}
+
+type SnapshotResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SnapshotResponse) Reset() {
+	*x = SnapshotResponse{}
+	mi := &file_proto_kv_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SnapshotResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SnapshotResponse) ProtoMessage() {}
+
+func (x *SnapshotResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_kv_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SnapshotResponse.ProtoReflect.Descriptor instead.
+func (*SnapshotResponse) Descriptor() ([]byte, []int) {
+	return file_proto_kv_proto_rawDescGZIP(), []int{7}
+}
+
 var File_proto_kv_proto protoreflect.FileDescriptor
 
 const file_proto_kv_proto_rawDesc = "" +
@@ -292,10 +357,9 @@ const file_proto_kv_proto_rawDesc = "" +
 	"\x0eproto/kv.proto\x12\x05kv.v1\"\x1e\n" +
 	"\n" +
 	"GetRequest\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\"9\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\"#\n" +
 	"\vGetResponse\x12\x14\n" +
-	"\x05value\x18\x01 \x01(\fR\x05value\x12\x14\n" +
-	"\x05found\x18\x02 \x01(\bR\x05found\"4\n" +
+	"\x05value\x18\x01 \x01(\fR\x05value\"4\n" +
 	"\n" +
 	"PutRequest\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
@@ -303,11 +367,15 @@ const file_proto_kv_proto_rawDesc = "" +
 	"\vPutResponse\"!\n" +
 	"\rDeleteRequest\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\"\x10\n" +
-	"\x0eDeleteResponse2\x97\x01\n" +
+	"\x0eDeleteResponse\"\x11\n" +
+	"\x0fSnapshotRequest\"\x12\n" +
+	"\x10SnapshotResponse2\x97\x01\n" +
 	"\x02KV\x12,\n" +
 	"\x03Get\x12\x11.kv.v1.GetRequest\x1a\x12.kv.v1.GetResponse\x12,\n" +
 	"\x03Put\x12\x11.kv.v1.PutRequest\x1a\x12.kv.v1.PutResponse\x125\n" +
-	"\x06Delete\x12\x14.kv.v1.DeleteRequest\x1a\x15.kv.v1.DeleteResponseB*Z(github.com/Ashrjz/raftkv/proto/kvpb;kvpbb\x06proto3"
+	"\x06Delete\x12\x14.kv.v1.DeleteRequest\x1a\x15.kv.v1.DeleteResponse2D\n" +
+	"\x05Admin\x12;\n" +
+	"\bSnapshot\x12\x16.kv.v1.SnapshotRequest\x1a\x17.kv.v1.SnapshotResponseB*Z(github.com/Ashrjz/raftkv/proto/kvpb;kvpbb\x06proto3"
 
 var (
 	file_proto_kv_proto_rawDescOnce sync.Once
@@ -321,24 +389,28 @@ func file_proto_kv_proto_rawDescGZIP() []byte {
 	return file_proto_kv_proto_rawDescData
 }
 
-var file_proto_kv_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_proto_kv_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_proto_kv_proto_goTypes = []any{
-	(*GetRequest)(nil),     // 0: kv.v1.GetRequest
-	(*GetResponse)(nil),    // 1: kv.v1.GetResponse
-	(*PutRequest)(nil),     // 2: kv.v1.PutRequest
-	(*PutResponse)(nil),    // 3: kv.v1.PutResponse
-	(*DeleteRequest)(nil),  // 4: kv.v1.DeleteRequest
-	(*DeleteResponse)(nil), // 5: kv.v1.DeleteResponse
+	(*GetRequest)(nil),       // 0: kv.v1.GetRequest
+	(*GetResponse)(nil),      // 1: kv.v1.GetResponse
+	(*PutRequest)(nil),       // 2: kv.v1.PutRequest
+	(*PutResponse)(nil),      // 3: kv.v1.PutResponse
+	(*DeleteRequest)(nil),    // 4: kv.v1.DeleteRequest
+	(*DeleteResponse)(nil),   // 5: kv.v1.DeleteResponse
+	(*SnapshotRequest)(nil),  // 6: kv.v1.SnapshotRequest
+	(*SnapshotResponse)(nil), // 7: kv.v1.SnapshotResponse
 }
 var file_proto_kv_proto_depIdxs = []int32{
 	0, // 0: kv.v1.KV.Get:input_type -> kv.v1.GetRequest
 	2, // 1: kv.v1.KV.Put:input_type -> kv.v1.PutRequest
 	4, // 2: kv.v1.KV.Delete:input_type -> kv.v1.DeleteRequest
-	1, // 3: kv.v1.KV.Get:output_type -> kv.v1.GetResponse
-	3, // 4: kv.v1.KV.Put:output_type -> kv.v1.PutResponse
-	5, // 5: kv.v1.KV.Delete:output_type -> kv.v1.DeleteResponse
-	3, // [3:6] is the sub-list for method output_type
-	0, // [0:3] is the sub-list for method input_type
+	6, // 3: kv.v1.Admin.Snapshot:input_type -> kv.v1.SnapshotRequest
+	1, // 4: kv.v1.KV.Get:output_type -> kv.v1.GetResponse
+	3, // 5: kv.v1.KV.Put:output_type -> kv.v1.PutResponse
+	5, // 6: kv.v1.KV.Delete:output_type -> kv.v1.DeleteResponse
+	7, // 7: kv.v1.Admin.Snapshot:output_type -> kv.v1.SnapshotResponse
+	4, // [4:8] is the sub-list for method output_type
+	0, // [0:4] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
 	0, // [0:0] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name
@@ -355,9 +427,9 @@ func file_proto_kv_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_kv_proto_rawDesc), len(file_proto_kv_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   8,
 			NumExtensions: 0,
-			NumServices:   1,
+			NumServices:   2,
 		},
 		GoTypes:           file_proto_kv_proto_goTypes,
 		DependencyIndexes: file_proto_kv_proto_depIdxs,
