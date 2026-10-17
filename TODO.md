@@ -35,6 +35,7 @@
 - [x] Add `context.WithTimeout` on every client call
 - [x] Add server-side concurrency limit / semaphore (backpressure)
 - [x] Implement graceful shutdown (drain in-flight, reject new, deadline)
+- [ ] Demo harness: kvcli (put/get/delete/snapshot/selftest/bench/verify) + demo.sh
 - [ ] **Benchmark:** p99 latency at target load (pick a number, hit it)
 - [ ] **Test:** shutdown mid-load, verify no dropped in-flight requests
 
