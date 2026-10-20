@@ -4,8 +4,7 @@ Location: `internal/store/`
 
 ## 1. What is this?
 
-The store is the part of raftkv that actually holds the data. It is a key-value
-map with three operations:
+The store holds the data: a key-value map with three operations.
 
 | Operation         | Meaning                                          |
 | ----------------- | ------------------------------------------------ |
@@ -13,128 +12,87 @@ map with three operations:
 | `Put(key, value)` | Create or overwrite a key                        |
 | `Delete(key)`     | Remove a key (no error if it was already absent) |
 
-Right now it lives entirely in memory. Later phases will make it durable
-(WAL + snapshots) and then put Raft in front of it. This document explains the
-current in-memory version and why it looks the way it does.
+Two implementations sit behind the `Store` interface:
 
-## 2. Where it fits in the bigger picture
+- **`MemStore`**: the in-memory map. Safe for concurrent use, not durable.
+- **`Engine`**: `MemStore` plus a WAL and snapshots. This is what the server
+  runs. An acknowledged write survives a crash.
+
+Byte formats are in `wal-format.md` and `snapshot-format.md`.
+
+## 2. Where it fits
 
 ```
- client ──gRPC──> server ──> [ Raft ] ──> Store  ──> (WAL + snapshots on disk)
- (Phase 2)                   (Phase 3)    (Phase 1)
+ client ──gRPC──> server ──> [ Raft ] ──> Engine ──> MemStore
+ (Phase 2)                   (Phase 3)      └──> WAL + snapshot (disk)
 ```
 
-The store knows nothing about networking or consensus. It only answers:
-"what is the value for this key, and how do I change it safely?" Keeping it
-that ignorant is deliberate: each layer can be built and tested on its own.
-
-Eventually, Raft will call `Put`/`Delete` on the store once a command has been
-agreed on by a majority of nodes (the "apply loop"). The store is the
-**state machine** in Raft terminology.
+Today the server calls `Engine` directly. The store knows nothing about
+networking or consensus. In Raft terms it is the state machine.
 
 ## 3. Files
 
-| File               | Purpose                                           |
-| ------------------ | ------------------------------------------------- |
-| `store.go`         | The `Store` interface and the `ErrNotFound` error |
-| `memstore.go`      | `MemStore`, the in-memory implementation          |
-| `memstore_test.go` | Unit tests, a concurrency test, and a benchmark   |
+| File           | Purpose                                                         |
+| -------------- | --------------------------------------------------------------- |
+| `store.go`     | `Store` interface and `ErrNotFound`                             |
+| `memstore.go`  | `MemStore`, plus `clone()` (snapshot copy)                      |
+| `engine.go`    | `Engine`: WAL-before-apply, recovery, `Snapshot`, `Close`       |
 
-## 4. Design decisions and why
+WAL and snapshot code lives in `internal/wal/`.
 
-### 4.1 A `Store` interface, not just a struct
-Other layers (WAL-backed store, Raft apply loop, test fakes) depend on the
-*shape* of the store, not on one implementation. Defining the interface first
-lets us swap implementations without touching callers.
+## 4. Design decisions
 
-### 4.2 `Put` and `Delete` return `error`
-An in-memory map cannot fail, so the error is always `nil` today. But once a
-write goes to disk through a WAL, it can fail (disk full, fsync error).
-Putting `error` in the signature now avoids changing every caller later.
+- **Interface first.** The server, engine and future Raft apply loop depend on
+  the `Store` shape, not on one implementation.
+- **Errors.** `MemStore` never fails. `Engine` can return `wal.ErrEmptyKey`,
+  `wal.ErrTooLarge`, `wal.ErrBroken` (see below) and `wal.ErrClosed`, all
+  wrapped so `errors.Is` works. A missing key is `ErrNotFound`.
+- **Keys are `string`, values are `[]byte`.** `[]byte` can't be a map key.
+- **Locking.** `MemStore` uses a `sync.RWMutex`. Values are copied in and out
+  so callers can never change stored data.
+- **Delete is idempotent.** Deleting a missing key is not an error. The engine
+  still logs the tombstone.
+- **WAL first, then memory.** `Engine` appends and fsyncs, then updates the map.
+  `Get` therefore never sees non-durable data, and a crash after the fsync is
+  fixed by replay.
+- **One mutex across "append + apply".** Writes are serialized, one fsync each.
+  This also lets a snapshot capture the map and the WAL offset at the same
+  instant. `Get` bypasses this mutex.
+- **Recovery.** On startup: delete a stale `snapshot.tmp`, load the snapshot,
+  replay the WAL after the snapshot's offset, and discard a torn tail. A bad
+  snapshot fails startup; it never falls back to a full replay.
+- **Broken engine.** After a failed WAL write or fsync, all later writes return
+  `ErrBroken` until the process restarts. Reads keep working.
+- **Snapshot.** Writers pause only while the map is copied. The file write,
+  rename and WAL truncation happen outside the lock. Any snapshot error means no
+  truncation. If only truncation fails, the next call retries it.
+  Lock order: `snapMu`, then `mu`.
+- **Close** waits for an in-flight snapshot before closing the WAL.
+- **No context.** Engine calls ignore `context`, so a timed-out write may still
+  commit and a running snapshot can't be cancelled.
 
-### 4.3 `ErrNotFound` sentinel for missing keys
-`Get` returns `ErrNotFound` for a missing key. Callers check it with
-`errors.Is(err, store.ErrNotFound)`. In Phase 2 the gRPC layer will translate
-it to the `NotFound` status code.
+## 5. Baseline numbers
 
-### 4.4 Keys are `string`, values are `[]byte`
-Go map keys must be comparable, and `[]byte` is not, so keys are strings.
-Values are raw bytes because the store should not care what they contain.
-
-### 4.5 A mutex protects the map
-Go maps are not safe for concurrent use. A simultaneous read and write is a
-data race and can crash the program. Many goroutines will call the store
-(gRPC handlers, the Raft apply loop), so every access goes through a lock.
-
-We use `sync.RWMutex`:
-- `Get` takes a **read lock** (many readers can hold it at once).
-- `Put` and `Delete` take the **write lock** (exclusive).
-
-`RWMutex` also prepares us for snapshots, where reads must keep working while
-a snapshot is being taken.
-
-### 4.6 Values are copied on the way in and on the way out
-A `[]byte` is a pointer to shared memory. Without copying, a caller could
-modify a slice after calling `Put`, or modify the slice returned by `Get`, and
-silently change what is stored, bypassing the lock. Copying makes the store the
-sole owner of its data. (`TestNoAliasing` checks this.)
-
-The copy in `Put` is made before taking the lock, so the lock is held only for
-the map assignment.
-
-### 4.7 `Delete` of a missing key is not an error
-Deleting is **idempotent**: doing it twice has the same result as doing it
-once. This matters later, because client retries (Phase 4) and Raft log
-replay can apply the same command more than once.
-
-## 5. How it is tested
-
-| Test               | What it proves                                                             |
-| ------------------ | -------------------------------------------------------------------------- |
-| `TestPutGetDelete` | Basic behaviour: missing key, create, overwrite, delete, idempotent delete |
-| `TestNoAliasing`   | Mutating the caller's slice never changes stored data                      |
-| `TestConcurrent`   | Many goroutines using the store at once; meaningful only with `-race`      |
-| `BenchmarkPut`     | Baseline write throughput with no durability                               |
-
-Run:
+WAL append with fsync (AMD Ryzen 7 6800HS, Linux, amd64):
 
 ```
-go test -race ./internal/store/
-go test -bench . -benchmem ./internal/store/
+sync  goroutines=1    ~2.15 ms/op   1.0 records/fsync
+group goroutines=64   ~77 µs/op     32.7 records/fsync
 ```
 
-Note for Windows/PowerShell: write `-bench .` (with a space) or
-`-bench="."`. The unquoted form `-bench=.` is split by PowerShell.
+`Engine` uses the synchronous path under a global mutex, so write throughput is
+capped at about 450 puts/s regardless of client concurrency.
 
-## 6. Baseline numbers
+## 6. Known limitations and open questions
 
-Machine: AMD Ryzen 7 6800HS, Windows, amd64.
-
-```
-BenchmarkPut-16   5784598   208.8 ns/op   21 B/op   2 allocs/op
-```
-
-Caveats: the benchmark builds keys with `fmt.Sprintf` inside the loop, so part
-of the 208 ns is key formatting, not the store. Treat this as a rough
-"no-durability ceiling" to compare against when fsync is added in Phase 1.
-
-## 7. Known limitations and open questions
-
-- **Not durable.** Everything is lost on restart. This is what the WAL and
-  snapshot items in Phase 1 fix.
-- **`nil` vs empty value is undefined.** `Put(k, nil)` stores a nil value, and
-  `Get` returns `nil, nil`, which is indistinguishable from an empty value.
-  Decide this before designing the WAL record format, since the format must
-  encode it.
-- **No versioning or compare-and-swap yet.** Planned for Phase 4.
-- **No iteration or range scan.** Not needed yet; snapshotting will need a way
-  to read all entries consistently.
-
-## 8. What changes next
-
-1. A WAL record format and append-on-write, so writes survive a crash.
-2. WAL replay on startup to rebuild the map.
-3. Snapshots and WAL truncation.
-
-The `Store` interface should stay the same through all of this. Only the
-implementation behind it changes.
+- **Writes are serialized**, one fsync each. Reads are not affected.
+- **Empty value and `nil` are the same after recovery.** Use `len(v) == 0`, not
+  `v == nil`. An empty value is legal and is not a Delete.
+- **Snapshots are manual** (Admin RPC or `kvcli snapshot`). Without a call, the
+  WAL and restart time keep growing.
+- **No versioning or CAS yet** (Phase 4), and no range scan.
+- **Open for Phase 3: Raft log vs. WAL.** The WAL has only Put/Delete records
+  and prefix truncation. Raft needs term/vote records and suffix truncation, and
+  using `Engine.Put` as the apply step would log every command twice. Decide
+  between a plain `MemStore` as the state machine (the Raft log is the
+  durability layer) or keeping `Engine`, before writing Raft code.
