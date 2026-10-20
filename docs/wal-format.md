@@ -1,163 +1,177 @@
-# WAL Format — v1
+# WAL Format - v1
 
 Status: draft. No backward-compatibility obligations before first release; any format change bumps the version.
 
 ## Conventions
 
-- **Endianness:** big-endian for all multi-byte integers.
-- **Checksum:** CRC32C (Castagnoli, reflected poly `0x82F63B78`), via Go `crc32.MakeTable(crc32.Castagnoli)`. Fixed for the life of a version.
-- **Offsets** are from the start of the file.
-- **Policy:** the decoder rejects anything it does not understand. A WAL is a durability structure; never guess.
+- Big-endian for all multi-byte integers.
+- Checksum: CRC32C (Castagnoli), via `crc32.MakeTable(crc32.Castagnoli)`.
+- Offsets in this document are from the start of the file.
+- The decoder rejects anything it does not understand. A WAL is a durability
+  structure; never guess.
 
 ## File layout
 
 ```
-[ Header (16 B) ][ Record ][ Record ] ... 
+[ Header (20 B) ][ Record ][ Record ] ...
 ```
 
-First record starts at offset 16.
+The first record starts at offset 20.
 
 ## Header (20 bytes)
 
-| Offset | Size | Field      | Value / rule                                              |
-| -----: | ---: | ---------- | --------------------------------------------------------- |
-|      0 |    4 | Magic      | `52 4B 56 57` (`"RKVW"`)                                  |
-|      4 |    2 | Version    | `0x0001`. Any other value → reject.                       |
-|      6 |    2 | Reserved   | Must be all zero. Non-zero → reject.                      |
-|      8 |    8 | BaseOffset | Logical offset of the first record in this file. New WAL = 0. |
-|     16 |    4 | Header CRC | CRC32C over bytes 0–15                                    |
+| Offset | Size | Field      | Rule                                                   |
+| -----: | ---: | ---------- | ------------------------------------------------------ |
+|      0 |    4 | Magic      | `52 4B 56 57` (`"RKVW"`)                               |
+|      4 |    2 | Version    | `0x0001`; any other value is rejected                  |
+|      6 |    2 | Reserved   | Must be zero                                           |
+|      8 |    8 | BaseOffset | Logical offset of the first record in this file; new WAL = 0 |
+|     16 |    4 | Header CRC | CRC32C over bytes 0-15                                 |
 
-Why: magic rejects foreign files; version is the upgrade path; header CRC
-separates "not our file" (bad magic) from "our file, damaged" (bad CRC).
-BaseOffset lets WAL truncation rewrite the file without invalidating
-logical offsets stored in snapshots.
+`BaseOffset` lets truncation rewrite the file without changing the logical
+offsets stored in snapshots. A logical offset counts record bytes only
+(headers excluded):
+
+```
+physical position = 20 + (logical offset - BaseOffset)
+```
 
 ## Record
 
-| Field   |   Size | Notes                                             |
-| ------- | -----: | ------------------------------------------------- |
-| CRC     |      4 | CRC32C over **Length + Type + Payload**           |
-| Length  |      4 | Payload byte count only (excludes Type and CRC)   |
-| Type    |      1 | `1` = Put, `2` = Delete. Anything else → invalid. |
-| Payload | Length | Shape depends on Type                             |
+| Field   |   Size | Notes                                           |
+| ------- | -----: | ----------------------------------------------- |
+| CRC     |      4 | CRC32C over Length + Type + Payload             |
+| Length  |      4 | Payload bytes only (excludes CRC and Type)      |
+| Type    |      1 | `1` = Put, `2` = Delete; anything else is invalid |
+| Payload | Length | Shape depends on Type                           |
 
-Total record size = `4 + 4 + 1 + Length`.
+Total record size = `9 + Length`. The CRC covers Length so a corrupted length
+is caught before it misleads the reader.
 
-CRC covers Length so a corrupted length is detected before it misleads the reader.
-
-### Payload shapes
-
-| Type   | Payload                               | Length formula        |
+| Type   | Payload                               | Length                |
 | ------ | ------------------------------------- | --------------------- |
 | Put    | `keyLen(u32) key valueLen(u32) value` | `8 + keyLen + valLen` |
 | Delete | `keyLen(u32) key`                     | `4 + keyLen`          |
 
-Strict: inner lengths must account for the payload **exactly**. Any mismatch or trailing byte → `ErrInvalid`, even if the CRC passes.
+Inner lengths must account for the payload exactly. Any mismatch or trailing
+byte is `ErrMalformed`, even if the CRC passes.
 
 ## Limits
 
-| Constant       | Value                       | Derivation                                         |
-| -------------- | --------------------------- | -------------------------------------------------- |
-| `MaxPayload`   | 16 MiB (16,777,216)         | Package constant, not stored in the header         |
-| `MaxKeySize`   | 1 KiB (1,024)               | Chosen                                             |
-| `MaxValueSize` | 16 MiB − 4 KiB (16,773,120) | Keeps `8 + MaxKeySize + MaxValueSize ≤ MaxPayload` |
+| Constant       | Value                       |
+| -------------- | --------------------------- |
+| `MaxPayload`   | 16 MiB (package constant)   |
+| `MaxKeySize`   | 1 KiB                       |
+| `MaxValueSize` | 16 MiB - 4 KiB              |
 
-- Empty key is invalid. Empty value is legal for Put (distinct from Delete).
-- Min valid Length: Delete = 5, Put = 9. `Length < 5` or `Length > MaxPayload` → `ErrInvalid`. This makes zeroed regions (`Length = 0`, `Type = 0`) invalid.
-- Validate `Length` **before** allocating. Do size arithmetic in `uint64`/`int` after the cap check (no `uint32` overflow).
-- Storage layer must enforce `MaxKeySize` / `MaxValueSize` before a write reaches the WAL.
+- An empty key is rejected on write (`ErrEmptyKey`). An empty value is legal
+  for Put and is not the same as Delete.
+- Valid `Length` is 5 to `MaxPayload`. This makes a zeroed region (`Length = 0`)
+  invalid.
+- `Length` is validated before any allocation.
+- Key and value limits are enforced before a record is encoded, so oversized
+  writes never reach the file (`ErrTooLarge`).
 
-## Decoder order (per record)
+## Decoding a record
 
-1. Read 8 bytes (CRC + Length) with `io.ReadFull`. 0 bytes → `io.EOF`; 1–7 → `ErrTruncated`.
-2. Validate `Length` against limits.
-3. Read `Type + Payload` (`1 + Length` bytes) with `io.ReadFull`. Short → `ErrTruncated`.
-4. Verify CRC. Mismatch → `ErrChecksum`.
-5. Validate Type, then parse payload strictly. Failure → `ErrInvalid`.
+1. Read the 9-byte prefix (CRC, Length, Type). Zero bytes gives `io.EOF`;
+   1-8 bytes gives `io.ErrUnexpectedEOF`.
+2. Validate `Length`. Failure is `ErrBadLength`.
+3. Read `Length` payload bytes. A short read is `io.ErrUnexpectedEOF`.
+4. Verify the CRC. Mismatch is `ErrChecksum`.
+5. Validate Type (`ErrBadType`), then parse the payload (`ErrMalformed`).
 
-## Error taxonomy
+## Errors and recovery
 
-The decoder **reports**; the recovery layer (Phase 1, task 5) **decides**.
+The decoder reports; `Recover` decides.
 
-| Error          | Meaning                           | Recovery action                                                                              |
-| -------------- | --------------------------------- | -------------------------------------------------------------------------------------------- |
-| `io.EOF`       | Clean end at a record boundary    | Done                                                                                         |
-| `ErrTruncated` | Partial record at tail            | Discard, truncate file to last good offset                                                   |
-| `ErrChecksum`  | Full record present, CRC mismatch | Last record → likely torn write, discard. Valid data after it → real corruption, fail loudly |
-| `ErrInvalid`   | Bad type / length / payload shape | Same handling as `ErrChecksum`                                                               |
+| Error                 | Meaning                              | Recovery action                                           |
+| --------------------- | ------------------------------------ | --------------------------------------------------------- |
+| `io.EOF`              | Clean end at a record boundary       | Done                                                      |
+| `io.ErrUnexpectedEOF` | File ends mid-record                 | Torn tail: truncate to the last good offset               |
+| `ErrChecksum`         | Full record present, CRC mismatch    | Torn tail only if it is the last record; otherwise fail   |
+| `ErrBadLength`        | Length out of range                  | Torn tail only if the rest of the file is all zeros; otherwise fail |
+| `ErrBadType`, `ErrMalformed` | Valid CRC, bad content        | Always fail (never a crash artifact)                      |
 
-Header errors: `ErrBadMagic`, `ErrUnsupportedVersion`, `ErrHeaderChecksum`, `ErrTruncated`, `ErrInvalid` (non-zero reserved). All fatal except as covered below.
+A torn tail is truncated and fsynced before any new append is accepted.
+Corruption anywhere else fails startup.
 
-## File-level edge cases
+Other errors: `ErrBadHeader` (bad magic, version, header CRC or short header),
+`ErrBadOffset` (replay offset outside the WAL), `ErrBroken`, `ErrClosed`.
 
-| Situation                   | Handling                                                                 |
-| --------------------------- | ------------------------------------------------------------------------ |
-| 0-byte file                 | Fresh WAL: write header                                                  |
-| 1–15 byte file              | Torn header (crash during creation); no records possible, rewrite header |
-| Header only                 | Valid, zero records                                                      |
-| Zeroed region after records | `ErrInvalid` (Length 0)                                                  |
+## File-level cases
 
-## Write rules (enforced in task 3)
+| Situation                    | Handling                                                              |
+| ---------------------------- | --------------------------------------------------------------------- |
+| 0-byte file                  | New WAL: write header, fsync file, fsync parent directory             |
+| 1-19 bytes                   | Must be a prefix of the expected header (crash during creation); rewrite the header. Otherwise `ErrBadHeader` |
+| Header only                  | Valid, zero records                                                   |
+| Zeroed region after records  | Torn tail (all zeros) and is truncated                                |
 
-- **One record = one contiguous buffer = one `write()` call.** Build `Length | Type | Payload`, compute CRC, prepend. This shrinks the torn-write window; it does not eliminate it, which is why the CRC exists.
-- **Header init:** on a 0-byte file, write header, `fsync` the file, then `fsync` the **parent directory** so the file's existence is durable. Only then accept records.
+## Write rules
+
+- One record = one contiguous buffer = one `write()`. This shrinks the torn-write
+  window; the CRC covers what remains.
+- `Append` returns only after the record is fsynced.
+- After a failed write or fsync the WAL is **broken**: every later append
+  returns `ErrBroken` until the process restarts and recovers.
+- `WithGroupCommit()` lets concurrent appends share one fsync. Each append still
+  returns only after its own record is durable.
+- `Recover(from)` replays records at logical offset `>= from`. `from` must be
+  within `[BaseOffset, end of file]`, otherwise `ErrBadOffset`.
 
 ## Truncation
 
-After a snapshot with `WALOffset = S` is durable, records before S are
-redundant. Truncation rewrites the WAL so its first record is the one at S:
+After a snapshot with `WALOffset = S` is fully durable, records before S are
+redundant. `TruncateBefore(S)`:
 
-1. Create `<wal>.tmp`; write a header with `BaseOffset = S`.
-2. Copy all record bytes from logical offset S to the logical end.
-3. `fsync` the tmp file.
-4. `rename` it over the WAL.
-5. `fsync` the parent directory.
+1. Create `<wal>.tmp` with a header whose `BaseOffset = S`.
+2. Copy the record bytes from logical offset S to the end.
+3. fsync the tmp file.
+4. Rename it over the WAL.
+5. fsync the parent directory.
 
-Rules:
-- Truncation starts only after the snapshot (file, rename, directory fsync)
-  is fully durable. Any snapshot error means no truncation.
+- Truncation starts only after the snapshot (file, rename, directory fsync) is
+  durable. Any snapshot error means no truncation.
 - Logical offsets never change, so a snapshot stays valid before, during and
-  after truncation. A crash at any step leaves either the old WAL or the new
-  one, and recovery (`Recover(from)`) is correct for both.
-- A directory-fsync failure after the rename marks the WAL broken: appends
-  after the rename must not be acknowledged until the rename is durable.
-- `<wal>.tmp` is deleted on open; it only exists if a crash happened before
-  the rename.
+  after truncation. A crash at any step leaves the old or the new WAL, and
+  recovery is correct for both.
+- If the directory fsync fails after the rename, the WAL is marked broken.
+- `<wal>.tmp` is deleted on open.
 
-## Worked example (golden test vectors)
+## Golden test vectors
 
-Header:
+Header (`BaseOffset = 0`):
 
 ```
 52 4B 56 57 | 00 01 | 00 00 | 00 00 00 00 00 00 00 00 | 08 81 32 B5
 ```
 
-`Put("a", "b")` — payload `00000001 61 00000001 62` (10 bytes), Length = `0x0000000A`:
+`Put("a", "b")`, Length = `0x0A`:
 
 ```
 B7 62 2D 95 | 00 00 00 0A | 01 | 00 00 00 01 61 00 00 00 01 62
 ```
 
-`Delete("a")` — payload `00000001 61` (5 bytes), Length = `0x00000005`:
+`Delete("a")`, Length = `0x05`:
 
 ```
 75 BD 31 A7 | 00 00 00 05 | 02 | 00 00 00 01 61
 ```
 
-Sanity check for CRC32C implementation: `CRC32C("123456789") = 0xE3069283`.
+CRC32C check value: `CRC32C("123456789") = 0xE3069283`.
 
 ## Benchmark
-```cmd
-goos: linux
-goarch: amd64
-pkg: github.com/Ashrjz/raftkv/internal/wal
-cpu: AMD Ryzen 7 6800HS with Radeon Graphics        
-BenchmarkAppend/sync/goroutines=1-16                1125           2151056 ns/op                 1.000 records/fsync
-BenchmarkAppend/sync/goroutines=8-16                1088           2264609 ns/op                 1.000 records/fsync
-BenchmarkAppend/sync/goroutines=64-16               1197           2139492 ns/op                 1.000 records/fsync
-BenchmarkAppend/group/goroutines=1-16               1165           2215558 ns/op                 1.000 records/fsync
-BenchmarkAppend/group/goroutines=8-16               4365            537076 ns/op                 4.023 records/fsync
-BenchmarkAppend/group/goroutines=64-16             29986             77397 ns/op                32.70 records/fsync
-PASS
-ok      github.com/Ashrjz/raftkv/internal/wal   16.507s
-```
+
+AMD Ryzen 7 6800HS, Linux, amd64:
+
+| Mode  | Goroutines | ns/op     | Records per fsync |
+| ----- | ---------: | --------: | ----------------: |
+| sync  |          1 | 2,151,056 | 1.0               |
+| sync  |         64 | 2,139,492 | 1.0               |
+| group |          1 | 2,215,558 | 1.0               |
+| group |          8 |   537,076 | 4.0               |
+| group |         64 |    77,397 | 32.7              |
+
+A synchronous append costs about one fsync (~2.1 ms). Group commit amortizes
+it across concurrent writers. The engine currently uses the synchronous path.
