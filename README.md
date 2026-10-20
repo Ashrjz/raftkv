@@ -60,11 +60,39 @@ quorum. Reads use a lease or read-index protocol to guarantee linearizability.
 
 ## Running locally
 
-> To be filled in once Phase 1/2 are complete.
+Build the server and the CLI:
 
 ```bash
-# placeholder
-go run ./cmd/node --id=1 --peers=...
+go build -o bin/kvserver ./cmd/kvserver
+go build -o bin/kvcli ./cmd/kvcli
+```
+
+Start a server (data is kept in `./data/` and survives restarts; Ctrl+C stops it gracefully):
+
+```bash
+./bin/kvserver --addr :7000 --wal ./data/raftkv.wal
+```
+
+Use it from another terminal:
+
+```bash
+./bin/kvcli put name alice
+./bin/kvcli get name          # alice
+./bin/kvcli delete name
+./bin/kvcli get name          # "not found", exit code 1
+./bin/kvcli snapshot          # snapshot the state and truncate the WAL
+```
+
+`kvcli` exit codes: 0 ok, 1 not found, 2 any other failure. Use
+`-addr host:port` before the command for a server that is not on `localhost:7000`.
+
+Server flags: `--addr`, `--wal`, `--max-inflight`, `--max-wait`, `--drain-timeout`
+(run `./bin/kvserver -h` for defaults).
+
+Acceptance demo (kill -9 recovery, snapshot, shutdown under load):
+
+```bash
+./demo.sh
 ```
 
 ## Testing
