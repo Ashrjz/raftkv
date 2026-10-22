@@ -1,6 +1,6 @@
 # Networking Layer Design
 
-Location: `proto/`, `internal/server/`, `client/`, `cmd/kvserver/`
+Location: `proto/`, `internal/server/`, `client/`, `cmd/kvserver/`, `cmd/kvcli/`
 
 ## 1. What is this?
 
@@ -33,6 +33,8 @@ handlers.
 | `internal/server/admin.go`  | `Snapshotter` interface, Admin `Snapshot` handler          |
 | `client/client.go`          | Client library: default timeouts, `ErrNotFound`, `Snapshot`|
 | `cmd/kvserver/main.go`      | Wires engine, server and signals into a runnable program   |
+| `cmd/kvcli/main.go`         | CLI: put/get/delete/snapshot, plus selftest, bench, verify |
+| `demo.sh`                   | Acceptance demo: kill -9 recovery, snapshot, shutdown under load |
 
 ## 4. API
 
@@ -113,12 +115,27 @@ synchronously and is serialized by the engine's `snapMu`. If the snapshot is
 written but WAL truncation fails, the call returns `Internal`; the snapshot is
 durable and the next call retries the truncation.
 
+### 5.10 `kvcli` doubles as the test harness
+Besides put/get/delete/snapshot, `kvcli` has three commands that run against a
+live server:
+
+- `selftest`: pass/fail checks for every status code and size limit.
+- `bench`: load generator (closed loop, or fixed `-rate` with latency measured
+  from each request's scheduled time). `-p99` fails the run if exceeded;
+  `-allow-unavailable` treats `Unavailable` as a clean rejection (shutdown and
+  crash tests); `-ack-file` records every acknowledged Put.
+- `verify -ack-file`: checks that every acknowledged Put is present with the
+  right value.
+
+Exit codes: 0 ok, 1 not found, 2 any other failure.
+
 ## 6. Behavior inherited from the engine
 
-- **Writes are serialized, one fsync each** (~2.1 ms, see the WAL benchmark), so
-  write latency under load grows with the number of concurrent writers.
+- **Writes are serialized, one fsync each** (~2.1 ms, see the WAL benchmark),
+  which caps throughput at about 450 puts/s however many clients there are.
+  Write latency under load grows with the number of concurrent writers.
   `max-wait` bounds the wait for a slot, not the wait on the engine mutex.
-- **Reads are not blocked by fsyncs.** `Get` takes only a memory read lock.
+- **Reads are not blocked by fsyncs**. Get takes only a memory read lock.
 - **The engine ignores `context`.** A request that times out may still commit,
   and a running snapshot cannot be cancelled. A client timeout therefore means
   the outcome is unknown (`Design.md` section 3).
@@ -135,3 +152,7 @@ durable and the next call retries the truncation.
 - A caller that cancels while waiting for a slot sees `ResourceExhausted`, not
   `Canceled`.
 - Snapshots are manual: without a call, the WAL is never compacted.
+- The limiter covers every RPC, including `Snapshot`, which holds a slot for
+  its whole run.
+- `Snapshot` returns `Internal` both when the snapshot failed and when only the
+  WAL truncation failed. Only the message tells them apart.
