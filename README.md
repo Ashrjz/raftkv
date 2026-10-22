@@ -70,7 +70,7 @@ go build -o bin/kvcli ./cmd/kvcli
 Start a server (data is kept in `./data/` and survives restarts; Ctrl+C stops it gracefully):
 
 ```bash
-./bin/kvserver --addr :7000 --wal ./data/raftkv.wal
+./bin/kvserver --addr 127.0.0.1:7000 --wal ./data/raftkv.wal
 ```
 
 Use it from another terminal:
@@ -81,6 +81,9 @@ Use it from another terminal:
 ./bin/kvcli delete name
 ./bin/kvcli get name          # "not found", exit code 1
 ./bin/kvcli snapshot          # snapshot the state and truncate the WAL
+./bin/kvcli selftest          # pass/fail checks against a live server
+./bin/kvcli bench -h          # load generator
+./bin/kvcli verify -ack-file FILE
 ```
 
 `kvcli` exit codes: 0 ok, 1 not found, 2 any other failure. Use
@@ -138,6 +141,14 @@ distributed-systems concepts that come up constantly in senior backend work:
 consensus, replication, CAP-theorem tradeoffs in practice, idempotency,
 concurrency correctness, and operability — by building them rather than just
 reading about them.
+
+## What works today
+
+- Single node, durable: WAL with fsync per write, manual snapshots, WAL truncation, crash recovery (kill -9 tested).
+- gRPC `Get`/`Put`/`Delete` and an Admin `Snapshot` RPC, with client timeouts, a concurrency limit and graceful shutdown.
+- `kvcli` with `selftest`, `bench` and `verify`.
+
+Not yet: replication, leader election, failover, automatic snapshots, TLS/auth.
 
 ## License
 
