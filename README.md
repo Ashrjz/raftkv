@@ -13,7 +13,7 @@ down to a single-developer, learnable size.
 🚧 Early development. See [TODO.md](./TODO.md) for the full build plan and
 current progress.
 
-Current phase: **Phase 2: Networking Layer**
+Current phase: **Phase 3: Raft Consensus — Leader Election**
 
 ## Goals
 

@@ -42,9 +42,9 @@ A distributed, replicated key-value store in Go, built on Raft, as a learning pr
 
 Two small interfaces keep I/O swappable:
 - `Transport`: sends `RequestVote` and `AppendEntries` to peers. The real implementation uses gRPC; tests can use a fake in-memory version that drops or delays messages.
-- `Storage`: persists `currentTerm`, `votedFor`, and the log. **Open decision:** the Phase 1 WAL has only Put/Delete records and prefix truncation, so it can't be used as is. See `store.md` section 6.
+- `Storage`: persists `currentTerm`, `votedFor`, and (from log replication on) the log. **Decided:** it is a separate small store, not the Phase 1 WAL. Leader election uses an atomically replaced `raft-state` file; the log gets its own file format with suffix truncation in the replication step. See `raft.md` sections 7 and 12.
 
-The state machine (the key-value map) is separate from Raft. Raft hands it committed entries through an apply loop.
+The state machine (the key-value map) is separate from Raft. Raft hands it committed entries through an apply loop. **Planned:** the state machine becomes a plain `MemStore` and the Raft log is the durability layer, so commands are not logged twice. The Phase 1 `Engine` is not used by Raft. To be confirmed when log replication starts.
 
 **Rules from day one (safety, not style):**
 - Persist `currentTerm`, `votedFor`, and log entries **before** replying to any RPC.
@@ -59,4 +59,5 @@ The state machine (the key-value map) is separate from Raft. Raft hands it commi
 | Durability         | WAL with fsync per write, under one engine mutex | Group commit                              | Simple and correct; caps writes at about 450/s. Group commit exists in the WAL but the engine doesn't use it                                                               |
 | Snapshots          | Manual, via Admin RPC; WAL truncated after a durable snapshot | Automatic trigger          | Explicit and testable; the WAL grows until called                                                                                                                          |
 | Backpressure       | Global in-flight limit; excess requests get `ResourceExhausted` | Per-connection stream limit | gRPC's per-connection limit is not global                                                                                                                                  |
-| Message size       | `MaxPayload` + 64 KiB, server and client      | gRPC default (4 MiB)                         | The default is below the engine's value limit                                                                                                                              |
+| Message size       | `MaxPayload` + 64 KiB, server and client      | gRPC default (4 MiB)                         | The default is below the engine's value limit
+| Raft storage       | Separate store: `raft-state` file (term, vote) now; own log file later | Extend the Phase 1 WAL with new record types | The WAL has only Put/Delete and prefix truncation; Raft needs suffix truncation, and reusing `Engine` would log each command twice. Cost: a second on-disk format |                                                                                                                              |

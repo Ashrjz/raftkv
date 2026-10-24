@@ -28,7 +28,8 @@ Byte formats are in `wal-format.md` and `snapshot-format.md`.
 ```
 
 Today the server calls `Engine` directly. The store knows nothing about
-networking or consensus. In Raft terms it is the state machine.
+networking or consensus. In Raft terms it is the state machine, but the Raft
+log will be stored separately (see `raft.md`).
 
 ## 3. Files
 
@@ -91,8 +92,9 @@ capped at about 450 puts/s regardless of client concurrency.
 - **Snapshots are manual** (Admin RPC or `kvcli snapshot`). Without a call, the
   WAL and restart time keep growing.
 - **No versioning or CAS yet** (Phase 4), and no range scan.
-- **Open for Phase 3: Raft log vs. WAL.** The WAL has only Put/Delete records
-  and prefix truncation. Raft needs term/vote records and suffix truncation, and
-  using `Engine.Put` as the apply step would log every command twice. Decide
-  between a plain `MemStore` as the state machine (the Raft log is the
-  durability layer) or keeping `Engine`, before writing Raft code.
+- **Raft storage (decided, see `raft.md`).** The Raft node uses its own store
+  (`raft-state` file, later a log file) instead of this WAL, which has only
+  Put/Delete records and prefix truncation. Planned: Raft will apply
+  committed entries to a plain `MemStore`, so `Engine` is not on the Raft
+  path and commands are not logged twice. Confirm when log replication
+  starts.
