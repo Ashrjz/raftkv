@@ -2,7 +2,7 @@
 
 ## Phase 0: Groundwork
 - [x] Read Raft paper (full read-through #1)
-- [~] Read Raft paper again, focus on Figure 2 (state + RPC rules)
+- [x] Read Raft paper again, focus on Figure 2 (state + RPC rules)
 - [x] Walk through Raft visualization (thesecretlivesofdata.com/raft)
 - [x] Skim etcd's `raft` package layout for structural reference
 - [x] Write 1-page design doc: supported ops, consistency model, non-goals
